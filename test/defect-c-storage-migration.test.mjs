@@ -12,13 +12,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
+import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
+import { commentAuthorTreeSource } from './fixtures/comment-author-tree.mjs'
 import { wrapAuthorMigrationStore } from '../lib/author-migration-adapter.js'
 import { transformStorageIndex } from '../deploy/apply-seams.mjs'
 import { describeSaveFormat, formatSaveResult } from '../lib/migration-ops.js'
 
+// 作者树来源：显式 `AUTHOR_TAVERN_PLUGIN` 优先，其次既有夹具入口 `commentAuthorTreeSource()`（env `DSH_TAVERN_TEST_APP`
+// 或本地 author-fixture）；都不可用时为 null —— 由 authorIndexSource() 明确要求环境，不留任何个人机器路径。
 const AUTHOR_ROOT = process.env.AUTHOR_TAVERN_PLUGIN
-  || 'C:\\Users\\aoloong\\AppData\\Local\\DSH-Tavern\\data\\harness\\apps\\dsh-tavern\\tavern-plugin'
+  || (commentAuthorTreeSource() ? path.join(commentAuthorTreeSource(), 'tavern-plugin') : null)
 
 /** 从插件自带的 author-clean-images.json.gz 取一份**未装缝**的作者 index.js。 */
 function loadCleanIndexSource(gzPath) {
@@ -119,7 +123,8 @@ test('我们自己的值域判据完全不受影响（describeSaveFormat 仍认 
 // ---------- ② 接缝 S2(d) 落在真作者 index.js 上 ----------
 
 function authorIndexSource() {
-  return readFileSync(AUTHOR_ROOT + '\\lib\\index.js', 'utf8')
+  if (!AUTHOR_ROOT) throw new Error('缺少作者树：请设 AUTHOR_TAVERN_PLUGIN 指向 tavern-plugin，或设 DSH_TAVERN_TEST_APP 提供作者 app 树（本测试不硬绑任何个人路径）')
+  return readFileSync(path.join(AUTHOR_ROOT, 'lib', 'index.js'), 'utf8')
 }
 
 test('接缝：幂等 —— 对已装缝的 index.js 二次应用不变', () => {
