@@ -7,18 +7,36 @@ export function applySettlementQuiescenceTransform(source) {
   const marker='// [dsh-tavern-settlement-quiescence:v1]'
   if (source.includes(marker)) {
     if (!source.includes('if (wait) await job.promise.catch(() => {})') || source.includes('if (!wait) jobs.delete(chatId)')) throw new Error('结算静止消费者不完整')
-    return source
+    return addSettlementIsBusy(source)
   }
   let next=marker+'\n'+once(source,'    if (!wait) jobs.delete(chatId)\n    else await job.promise.catch(() => {})','    if (wait) await job.promise.catch(() => {})')
   next=once(next,'      if (jobs.get(chatId) === job) jobs.delete(chatId)\n      // Cancellation/deletion', '      // Cancellation/deletion')
   next=once(next,'      if (!disposed && !signal.aborted) await onSettled(chatId, signal)', '      try { if (!disposed && !signal.aborted) await onSettled(chatId, signal) }\n      finally { if (jobs.get(chatId) === job) jobs.delete(chatId) }')
-  return next
+  return addSettlementIsBusy(next)
+}
+/**
+ * 结算作业静止证明（生产转换内注入，不改离线作者）：`isBusy(chatId)` 只读 jobs Map 的归属查询。
+ * 幂等：已带成员则原样返回；`return Object.freeze({ start, cancel, dispose })` 缺/重一律响亮拒（不猜作者布局）。
+ */
+function addSettlementIsBusy(source) {
+  if (!source.includes('isBusy: chatId => jobs.has(chatId)')) source=once(source, '  return Object.freeze({ start, cancel, dispose })', '  return Object.freeze({ start, cancel, dispose, isBusy: chatId => jobs.has(chatId) })')
+  if(!source.includes('onIdle = () => {}')) {
+    source=once(source,'createSettlementJobs({ run, onSettled })','createSettlementJobs({ run, onSettled, onIdle = () => {} })')
+    source=once(source,'finally { if (jobs.get(chatId) === job) jobs.delete(chatId) }','finally { if (jobs.get(chatId) === job) { jobs.delete(chatId); if (!disposed) onIdle(chatId) } }')
+  }
+  return source
+}
+function addForegroundIdleSignal(source) {
+  if(source.includes('options.onIdle?.(sessionId)'))return source
+  return once(source,'.finally(function () { pending.delete(task); settle() })','.finally(function () { pending.delete(task); settle(); try { options.onIdle?.(sessionId) } catch (error) { logger.error(\'dsh-tavern: 静止通知失败\', error) } })')
 }
 export function applyForegroundQuiescenceTransform(source) {
   const marker='// [dsh-tavern-foreground-quiescence:v1]'
   if (source.includes(marker)) {
     if (!source.includes('async function whenIdle(sessionId)') || !source.includes('pending.set(task, sessionId)')) throw new Error('前台延迟任务静止消费者不完整')
-    return source
+    if(source.includes('function isBusy(sessionId)') && source.includes('whenIdle, isBusy })'))return addForegroundIdleSignal(source)
+    let upgraded=once(source,'  const pending = new Map()','  const pending = new Map()\n  function isBusy(sessionId) { return [...pending.values()].includes(sessionId) }')
+    return addForegroundIdleSignal(once(upgraded,'whenIdle })','whenIdle, isBusy })'))
   }
   const old=`  function later(work, label) {
     defer(function () {
@@ -44,11 +62,13 @@ export function applyForegroundQuiescenceTransform(source) {
       if (!active.length) return
       await Promise.all(active)
     }
-  }`
+  }
+  // 只读成员：前台该 session 是否还有未完成的延迟交接任务（静止证明用，不新增服务/事件/轮询）。
+  function isBusy(sessionId) { return [...pending.values()].includes(sessionId) }`
   let out=marker+'\n'+once(source,old,next)
   out=once(out,"      }, '启动后台结算')", "      }, '启动后台结算', input.sessionId)")
   out=once(out,"    }, '清理未完成前台回合')", "    }, '清理未完成前台回合', input.sessionId)")
   out=once(out,'      if (cleanupFailedTurn !== null) await cleanupFailedTurn(target)', '      // 失败尾部保留至用户统一物理回退；禁止追加空tombstone冒充删除。')
-  out=once(out,'  return Object.freeze({ prepare, finalize, end, recover })','  return Object.freeze({ prepare, finalize, end, recover, whenIdle })')
-  return out
+  out=once(out,'  return Object.freeze({ prepare, finalize, end, recover })','  return Object.freeze({ prepare, finalize, end, recover, whenIdle, isBusy })')
+  return addForegroundIdleSignal(out)
 }

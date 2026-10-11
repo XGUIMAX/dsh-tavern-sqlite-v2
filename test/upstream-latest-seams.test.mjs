@@ -84,7 +84,13 @@ test('index链（新树）：施缝落地且新作者 patch/readRecent/changedSi
   assert.equal(next.split('changedSince: (chatId, revision) => chatPersistence.readChangedIndices(chatId, revision, { limit: 2048 }),').length - 1, 1)
   assert.equal(next.split('rowsAt: async (chatId, revision, indices) => {').length - 1, 1)
   // 静止门面插在作者展示位之前，且展示名仍是作者的 presentStory（未被换回 view）。
-  assert.equal(next.includes('    cleanupRollbackSides: (chat, turn) => worldbookRecallLog.pruneRollback(chat, turn, chat.timeline.branchId),\n    quiesceRollback: async chat => {'), true)
+  const cleanup = '    cleanupRollbackSides: (chat, turn) => worldbookRecallLog.pruneRollback(chat, turn, chat.timeline.branchId),'
+  const idle = '    isFailureCleanupIdle: chat =>'
+  const quiesce = '    quiesceRollback: async chat => {'
+  assert.equal(next.split(cleanup).length - 1, 1)
+  assert.equal(next.split(idle).length - 1, 1)
+  assert.equal(next.split(quiesce).length - 1, 1)
+  assert.ok(next.indexOf(cleanup) < next.indexOf(idle) && next.indexOf(idle) < next.indexOf(quiesce), '当前静止证明位于侧清理与静止屏障之间')
   assert.match(next, /\n    \},\n    present: presentStory,/)
   assert.equal(next.split('    present: presentStory,').length - 1, 2, '两处作者 presentStory 调用点都必须保留')
   parseOnly('index-chain-new', next)

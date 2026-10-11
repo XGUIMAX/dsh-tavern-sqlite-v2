@@ -109,6 +109,8 @@ window.__ModuleLoader__.load({
       if (!Number.isSafeInteger(cft.turn) || Number(cft.turn) !== Number(ft.turn)) return 'turn 不一致'
       if (typeof ft.branchId !== 'string' || ft.branchId === '' || cft.branchId !== ft.branchId) return 'branchId 不一致'
       if (!Number.isSafeInteger(cft.revision) || !Number.isSafeInteger(ft.revision) || Number(cft.revision) !== Number(ft.revision)) return 'revision 不一致'
+      if ((ft.incomplete === true) !== (cft.incomplete === true)) return 'incomplete 不一致'
+      if (ft.incomplete === true && (!Number.isSafeInteger(ft.endSeq) || ft.eventCount !== ft.endSeq + 1 || cft.endSeq !== ft.endSeq || cft.eventCount !== ft.eventCount)) return '不完整轮末尾坐标不一致'
       if (ftKind === 'native-only') {
         if (ft.operationId !== undefined || cft.operationId !== undefined) return 'native 不得带 operationId'
         if (!Number.isSafeInteger(ft.endSeq) || ft.endSeq <= 0 || !Number.isSafeInteger(ft.eventCount) || ft.eventCount !== ft.endSeq + 1) return 'native 目标形状不合法'
@@ -398,11 +400,14 @@ window.__ModuleLoader__.load({
         () => (ui && typeof ui.readFailureTarget === 'function' ? ui.readFailureTarget(handle) : null),
         [ui, handle, snapshot])
       const running = props.useSession ? Boolean(props.useSession(snap => snap && snap.running)) : false
-      // activity 直接取作者同一选择里的字段（不猜、不另读）：结算 pending/running 期间禁止清理。
+      // activity 直接取作者同一选择里的字段（不猜、不另读）：前台在跑、或后台任何 role 的 pending/running 期间都不显示清理条。
       const activity = snapshot && snapshot.view && snapshot.view.activity ? snapshot.view.activity : null
       const settlementActive = Boolean(activity) && activity.role === 'settlement'
         && (activity.phase === 'pending' || activity.phase === 'running')
-      const blocked = running || settlementActive
+      // 用户合同：只有前台与后台**都停**才显示；pending 的 durable 结算（busy 可能为 false）同样不得提前弹。
+      const activityActive = Boolean(activity)
+        && (activity.busy === true || activity.phase === 'pending' || activity.phase === 'running')
+      const blocked = running || settlementActive || activityActive
       // 同组件内互斥用 ref（不触发额外 render，也不因 React strict 双挂载而漏防重入）。
       const inFlight = React.useRef(false)
       const [busy, setBusy] = React.useState(false)
@@ -410,6 +415,8 @@ window.__ModuleLoader__.load({
       const mounted = React.useRef(false)
       React.useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
       if (!ui || !handle || !current) return null
+      // 前后台任一在跑/挂起 ⇒ 不显示清理条（连禁用按钮都不给，避免误点与误判）。
+      if (blocked) return null
       const onClick = async () => {
         if (inFlight.current || blocked || !ui.active) return
         inFlight.current = true
@@ -530,6 +537,12 @@ window.__ModuleLoader__.load({
             const staleReason = targetCompare(ft, liveTarget)
             if (staleReason !== '') throw new Error('清理目标已过期（与当前视图不一致），拒绝清理：' + staleReason)
             if ((ft.rollbackId || null) !== (liveTarget.rollbackId || null)) throw new Error('清理目标已过期（重试身份不一致），拒绝清理')
+            // 执行前再核一次静止（同一快照语义）：前台 session 仍在跑或后台活动 pending/running ⇒ 拒绝，绝不抢先清理。
+            const liveActivity = handle.getSnapshot && handle.getSnapshot() && handle.getSnapshot().view
+              ? handle.getSnapshot().view.activity : null
+            if (liveActivity && (liveActivity.busy === true || liveActivity.phase === 'pending' || liveActivity.phase === 'running')) {
+              throw new Error('当前会话前台或后台仍在活动，稍后再清理，拒绝清理')
+            }
             if (!sessionsRef || typeof sessionsRef.waitForTavernRollbackSync !== 'function') {
               throw new Error('回退同步尚未接线或尚未就绪，未执行清理')
             }

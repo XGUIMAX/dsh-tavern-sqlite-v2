@@ -195,7 +195,7 @@ export class SqliteSessionDb {
 	}
 
 	/** 纯尾DELETE与唯一自身身份保存同事务；不是普通追加豁免，不关闭任何回退屏障。 */
-	truncateFrom(boundarySeq, identity) {
+	truncateFrom(boundarySeq, identity, retainedEvents) {
 		if (!Number.isSafeInteger(boundarySeq) || boundarySeq < -1) throw new Error('回退SQL边界无效')
 		this.db.exec("BEGIN IMMEDIATE")
 		try {
@@ -205,15 +205,33 @@ export class SqliteSessionDb {
 				if (meta?.header.origin !== 'subagent' || rows.length !== 1 || !isDeepStrictEqual(rowToEvent(rows[0]), identity) || identity.seq <= boundarySeq || Object.keys(identity).some(key => !['seq','type','time','data'].includes(key))) throw new Error('回退身份必须来自本Session既有唯一自身元数据，拒绝伪造或业务写入')
 				rollbackIdentity = { type: identity.type, seq: boundarySeq + 1, time: identity.time, data: identity.data }
 			}
+			let retained
+			if(retainedEvents!==undefined) {
+				if(identity!==undefined || !Array.isArray(retainedEvents) || !retainedEvents.length)throw new Error('旧轮编辑保留列表不合法')
+				retained=[]
+				for(const [i,event] of retainedEvents.entries()) {
+					const stored=this.db.prepare('SELECT seq,type,time,data_json,extra_json FROM events WHERE seq=?').get(event?.seq)
+					const marker=event?.type==='dsh-tavern/required-session-patch-v1' && event.data?.version===1 && retainedEvents[i+1]?.type==='assistant/message' && retainedEvents[i+1].seq===event.seq+1
+					const op=event?.surfaceOp,refs=event?.sourceEventSeqs,source=event?.data?.message?.source
+					const original=Number.isSafeInteger(op?.startSeq)?this.db.prepare('SELECT seq,type,time,data_json,extra_json FROM events WHERE seq=?').get(op.startSeq):null
+					const prior=original?rowToEvent(original):null
+					const edit=event?.type==='assistant/message' && source?.kind==='model' && source.provider==='dsh-tavern' && source.model==='body-edit'
+						&& op?.op==='replace' && op.startSeq===op.endSeq && op.startSeq<=boundarySeq && Array.isArray(refs) && refs.length===1 && refs[0]===op.startSeq
+						&& prior?.type==='assistant/message' && prior.surfaceOp==='append' && prior.data?.turn===event.data?.turn
+					if(!stored || !isDeepStrictEqual(rowToEvent(stored),event) || event.seq<=boundarySeq || (i>0 && event.seq<=retainedEvents[i-1].seq) || (!marker && !edit))throw new Error('旧轮编辑必须来自本Session既有精确引用，拒绝保留其他事件')
+					retained.push({...event,seq:boundarySeq+1+i})
+				}
+			}
 			this.db.prepare("DELETE FROM events WHERE seq > ?").run(boundarySeq)
 			if (rollbackIdentity) {
 				if (this.cursor() !== boundarySeq + 1) throw new Error('回退身份保存前SQL前缀不连续')
 				this.stmts.insertEvent.run(...rowToInsertArgs(rollbackIdentity))
 			}
+			if(retained)for(const event of retained)this.stmts.insertEvent.run(...rowToInsertArgs(event))
 			this.db.prepare("UPDATE sessions SET event_count = ?").run(this.cursor())
 			const meta = this.readMeta()
 			this.db.exec("COMMIT")
-			return rollbackIdentity ? { ...meta, rollbackIdentity } : meta
+			return {...meta,...(rollbackIdentity?{rollbackIdentity}:{}),...(retained?{retainedEvents:retained}:{})}
 		} catch (error) {
 			this.db.exec("ROLLBACK")
 			throw error

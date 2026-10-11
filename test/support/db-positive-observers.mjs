@@ -74,7 +74,7 @@ export function registerDbTests(test, lifecycle) {
     assert.equal(index.split('dbSaveDeleteFootprint(chatId, [footprint.foregroundSessionId').length - 1, 1)
     // ④ 官方锚点与 Set cache consumer 未被串改
     for (const literal of [
-      "import { computeSceneTarget, createSceneIllustrations, sceneTarget } from './domain/scene-illustration.js'",
+      installed.before[INDEX].split('\n').find(line => line.startsWith('import { computeSceneTarget, createSceneIllustrations, sceneTarget') && line.endsWith("from './domain/scene-illustration.js'")),
       'const importingGameSaves = new Set()',
       'const deletedChatIds = new Set()',
       'const original = sceneTarget(historical, target.turn)'

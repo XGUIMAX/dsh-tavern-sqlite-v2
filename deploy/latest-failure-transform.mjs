@@ -66,13 +66,42 @@ const IMPORT_LINE = "import { inspectNativeFailureTail } from './storage-rollbac
 const EVIDENCE_IMPORT = "import { readFailureEvidence as readFailureEvidenceFromQuery } from './domain/storage-rollback.js'\n"
 const EVIDENCE_ANCHOR = '  function sessionDebugEvidence(sessionId, includeSession = false) {'
 const EVIDENCE_CALL_BEFORE = 'const rollbackEvidence = sessionDebugEvidence(chat.sessionId, true)'
-const EVIDENCE_CALL_AFTER = 'const rollbackEvidence = await readFailureEvidence(chat.sessionId)'
+const EVIDENCE_CALL_AFTER_LEGACY = 'const rollbackEvidence = await readFailureEvidence(chat.sessionId)'
+// 证据读口同步传 chat.id：后台结算作业按 chatId 归属，缺它无法证明"该档后台已停"。
+const EVIDENCE_CALL_AFTER = 'const rollbackEvidence = { ...await readFailureEvidence(chat.sessionId, chat.id), activity }'
 // 证据读口方法体**只含函数**（不夹 import；折叠导入由最终 return 一次性前置到顶层）。
 const EVIDENCE_METHOD_LEGACY = "async function readFailureEvidence(sessionId) { return await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId) }"
-const EVIDENCE_METHOD = "async function readFailureEvidence(sessionId) { return await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId, (_id, events) => typeof sessionPatch?.surfaceNodes === 'function' ? sessionPatch.surfaceNodes(events) : foldSurfaceForEvidence(events).nodes) }"
+const EVIDENCE_METHOD_V1 = "async function readFailureEvidence(sessionId) { return await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId, (_id, events) => typeof sessionPatch?.surfaceNodes === 'function' ? sessionPatch.surfaceNodes(events) : foldSurfaceForEvidence(events).nodes) }"
+// v2：新增可选 chatId 与**前后台静止证明**（同闭包真实 API：agentRegistry / foregroundHandoff.isBusy / settlementJobs.isBusy）。
+// 只有前台 agent 不在 running、且该 chat 无在跑的交接/结算作业，才算 idle；证据里同时带上活动快照（调用方可再据此守）。
+const EVIDENCE_METHOD = "async function readFailureEvidence(sessionId, chatId) { if (typeof foregroundHandoff?.isBusy !== 'function' || typeof settlementJobs?.isBusy !== 'function' || typeof chatId !== 'string' || !chatId) throw new Error('失败清理缺少前后台运行器静止接线'); const evidence = await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId, (_id, events) => typeof sessionPatch?.surfaceNodes === 'function' ? sessionPatch.surfaceNodes(events) : foldSurfaceForEvidence(events).nodes); const foregroundActive = agentRegistry.get(sessionId)?.phase?.kind === 'running' || foregroundHandoff.isBusy(sessionId) === true; const backgroundActive = settlementJobs.isBusy(chatId) === true; return { ...evidence, foregroundActive, backgroundActive, cleanupIdle: foregroundActive !== true && backgroundActive !== true } }"
 function once(source, before, after) {
   if (source.split(before).length !== 2) throw new Error('最新失败接缝锚点缺失/不唯一：' + before.slice(0, 90))
   return source.replace(before, after)
+}
+// 缓存/脏消息路径同样必须异步取得运行器证明；不能用默认sessionDebugEvidence覆盖首次目标。
+function upgradeVolatileEvidenceHost(source) {
+  const marker='// [dsh-tavern-failure-volatile-evidence:v1]'
+  const calls=[
+    ['volatileSessionViewFields(chat, activity, {baseRevision:chat._storageRevision,indices:[],layoutChanged:false})','await volatileSessionViewFields(chat, activity, {baseRevision:chat._storageRevision,indices:[],layoutChanged:false})'],
+    ['volatileSessionViewFields(chat, activity, changes), {','await volatileSessionViewFields(chat, activity, changes), {']
+  ]
+  if(source.includes(marker)) {
+    if(source.split(marker).length!==2 || !source.includes('async function volatileSessionViewFields(chat, activity, changes)') || !source.includes('sessionStateView.volatile(chat, activity, changes, evidence)') || calls.some(([,next])=>!source.includes(next)))throw new Error('易变视图失败证据接线不完整')
+    return source
+  }
+  source=once(source,'function volatileSessionViewFields(chat, activity, changes) {','async function volatileSessionViewFields(chat, activity, changes) {\n    '+marker+'\n    const evidence = { ...await readFailureEvidence(chat.sessionId, chat.id), activity }')
+  source=once(source,'sessionStateView.volatile(chat, activity, changes)','sessionStateView.volatile(chat, activity, changes, evidence)')
+  for(const [before,after] of calls)source=once(source,before,after)
+  return source
+}
+function addIdleSignals(source) {
+  const old='const settlementJobs = createSettlementJobs({ run: runSettlement, onSettled: onSettlementSettled })'
+  const next="const settlementJobs = createSettlementJobs({ run: runSettlement, onSettled: onSettlementSettled, onIdle: chatId => { void taskStateReader.read(chatId).then(chat => { if (chat) sessionSignals.publish(chat.sessionId, {kind:'tavern-state',version:'cleanup-idle:' + Date.now()}) }).catch(error => console.warn('dsh-tavern: 结算静止通知失败', error)) } })"
+  if(!source.includes(next))source=once(source,old,next)
+  const anchor='    turns: turnOrchestrator,',withIdle=anchor+"\n    onIdle: sessionId => sessionSignals.publish(sessionId, {kind:'tavern-state',version:'cleanup-idle:' + Date.now()}),"
+  if(!source.includes(withIdle))source=once(source,anchor,withIdle)
+  return upgradeVolatileEvidenceHost(source)
 }
 export function applyLatestFailureHostTransform(source) {
   // 双形态严格唯一：新版上游（42852b0/2.5.0）rollbackTurn 为多行块（save/回执后自带 notifyPluginTimeline('rollback')），旧版为单行 return。
@@ -82,14 +111,19 @@ export function applyLatestFailureHostTransform(source) {
   const afterNew = "        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && (args.failureTarget || args.expectedTurn))"
   if (source.includes(HOST_MARKER)) {
     if (source.split(HOST_MARKER).length !== 2 || !(source.includes(after) || source.includes(afterNew)) || !source.includes(EVIDENCE_IMPORT)
-      || !source.includes(EVIDENCE_CALL_AFTER)) throw new Error('最新失败宿主接线不完整')
-    // 已 marked 的旧代证据读口（无真 fold 推导、无折叠导入）必须**可升级**，不能只判"不完整"就拒。
-    if (source.includes(EVIDENCE_METHOD) && source.includes(EVIDENCE_FOLD_LINE)) return source
+      || !(source.includes(EVIDENCE_CALL_AFTER) || source.includes(EVIDENCE_CALL_AFTER_LEGACY))) throw new Error('最新失败宿主接线不完整')
+    // 已 marked 的旧代证据读口（无真 fold 推导/无静止证明）必须**可升级**，不能只判"不完整"就拒。
+    if (source.includes(EVIDENCE_METHOD) && source.includes(EVIDENCE_FOLD_LINE)) return addIdleSignals(source)
+    if (source.includes(EVIDENCE_METHOD_V1)) {
+      const upgradedV1 = once(source, EVIDENCE_METHOD_V1, EVIDENCE_METHOD)
+      return addIdleSignals(once(upgradedV1, EVIDENCE_CALL_AFTER_LEGACY, EVIDENCE_CALL_AFTER))
+    }
     const prior=EVIDENCE_METHOD_LEGACY
     if (!source.includes(prior)) throw new Error('最新失败宿主证据读口缺失/未知形状')
     // 升级：完整旧读口只替换一次，折叠导入只补一次且留在顶层。
     const upgraded = once(source, prior, EVIDENCE_METHOD)
-    return upgraded.includes(EVIDENCE_FOLD_LINE) ? upgraded : once(upgraded, EVIDENCE_IMPORT, EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE)
+    const withCall=upgraded.includes(EVIDENCE_CALL_AFTER_LEGACY)?once(upgraded, EVIDENCE_CALL_AFTER_LEGACY, EVIDENCE_CALL_AFTER):upgraded
+    return addIdleSignals(withCall.includes(EVIDENCE_FOLD_LINE) ? withCall : once(withCall, EVIDENCE_IMPORT, EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE))
   }
   const hasNew = source.split(beforeNew).length === 2
   const hasLegacy = source.split(before).length === 2
@@ -98,12 +132,17 @@ export function applyLatestFailureHostTransform(source) {
   next = once(next, EVIDENCE_CALL_BEFORE, EVIDENCE_CALL_AFTER)
   next = once(next, EVIDENCE_ANCHOR, '  ' + EVIDENCE_METHOD + '\n' + EVIDENCE_ANCHOR)
   // 折叠导入**只此一处**前置到顶层（与证据导入相邻），不插进任何函数体。
-  return EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE + next
+  return addIdleSignals(EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE + next)
 }
 export function applyLatestFailureViewTransform(source) {
   const fields = `      failureTarget: latestFailureTarget(chat, replayTarget, evidence),
       failureCleanupReason: latestFailureCleanupReason(chat, replayTarget, evidence),`
   const helper = `function latestFailureTarget(chat, replayTarget, evidence) {
+  // 前后台静止门（用户合同）：前台 agent/交接或该档结算作业仍在跑时不签任何清理目标。
+  // cleanupIdle 由宿主证据读口按同闭包真实 API 签发；activity 由 view 传入（pending 的 durable 结算即使 busy=false 也不得提前弹）。
+  if (!evidence || evidence.cleanupIdle !== true) return null
+  if (evidence && (evidence.foregroundActive === true || evidence.backgroundActive === true)) return null
+  if (evidence && evidence.activity && (evidence.activity.busy === true || evidence.activity.phase === 'pending' || evidence.activity.phase === 'running')) return null
   // 终止失败生命周期（当前已证最小必要合同）：只有"最新 turn/start 之后同轮出现 turn/end 且 reason 为 error/aborted"才允许签**新 body 目标**；
   // 仍 active（无 end）或 end completed 一律不签——停止中的轮没有明确失败生命周期，不提示清理是安全的。
   const failureEnding = (source) => {
@@ -182,9 +221,11 @@ function latestFailureCleanupReason(chat, replayTarget, evidence) {
     return 'active'
   }
   const ending = failureEnding(evidence)
-  // 活动/成功/无轮先截断说明（pending-retry 说明仍优先）：不让 native inspector 对 running body 的“须清理”文案漏出
-  if ((ending === 'active' || ending === 'completed' || ending === 'none') && !(chat.rollbackPending && chat.rollbackPending.failureTarget)) return ''
+  // 活动态不提示错误；已终止的遗留不完整轮使用同一签名判定的说明。
+  if (!evidence || evidence.cleanupIdle !== true || evidence.foregroundActive || evidence.backgroundActive || evidence.activity?.busy || ['pending','running'].includes(evidence.activity?.phase)) return ''
   const native = inspectNativeFailureTail(chat, evidence, revision)
+  if (native?.incomplete || native?.target?.incomplete) return native.reason
+  if ((ending === 'active' || ending === 'completed' || ending === 'none') && !(chat.rollbackPending && chat.rollbackPending.failureTarget)) return ''
   // native 挡住了更旧 body 目标时优先报 native 的真实原因（只有确实没有可清理目标才给说明）。
   if (native && !native.target && Number.isSafeInteger(native.turn) && typeof native.reason === 'string' && native.reason !== ''
     && !latestFailureTarget(chat, replayTarget, evidence)) return native.reason
@@ -238,12 +279,30 @@ function latestFailureCleanupReason(chat, replayTarget, evidence) {
     }
     // R1：作者节点推导改走证据节点（冷档 evidence.nodes / live 仍 session.surface.nodes）；已升级则原样。
     source = upgradeAuthorNodesLine(source)
+    // 清理目标可独立于普通回退surface；菜单必须同样可用，目标轮号来自同一签名。
+    source=upgradeIncompleteAvailability(source)
+    // 旧 marked 视图（helper 无静止门）必须**就地升级**；不完整/未知形状仍旧拒。
+    const gate = helper.slice(helper.indexOf('  // 前后台静止门'), helper.indexOf('  // 终止失败生命周期'))
+    const newReason = `  // 活动态不提示错误；已终止的遗留不完整轮使用同一签名判定的说明。
+  if (!evidence || evidence.cleanupIdle !== true || evidence.foregroundActive || evidence.backgroundActive || evidence.activity?.busy || ['pending','running'].includes(evidence.activity?.phase)) return ''
+  const native = inspectNativeFailureTail(chat, evidence, revision)
+  if (native?.incomplete || native?.target?.incomplete) return native.reason
+  if ((ending === 'active' || ending === 'completed' || ending === 'none') && !(chat.rollbackPending && chat.rollbackPending.failureTarget)) return ''`
+    const oldReason = `  // 活动/成功/无轮先截断说明（pending-retry 说明仍优先）：不让 native inspector 对 running body 的“须清理”文案漏出
+  if ((ending === 'active' || ending === 'completed' || ending === 'none') && !(chat.rollbackPending && chat.rollbackPending.failureTarget)) return ''
+  const native = inspectNativeFailureTail(chat, evidence, revision)`
+    const oldIncompleteReason='  if (native?.target?.incomplete) return native.reason'
+    const newIncompleteReason='  if (native?.incomplete || native?.target?.incomplete) return native.reason'
+    if(source.includes(oldIncompleteReason))source=once(source,oldIncompleteReason,newIncompleteReason)
+    const previousHelper = helper.replace(gate, '').replace(newReason, oldReason)
+    if (!source.includes(helper) && source.includes(previousHelper)) source = once(source,previousHelper,helper)
+    source = upgradeLatestFailureHelper(source, helper)
     const required = [IMPORT_LINE, helper, fields,
       'const revision = Number.isSafeInteger(chat.windowRevision) ? chat.windowRevision : chat._storageRevision',
       'canClearIncompleteReply: latestFailureTarget(chat, replayTarget, evidence) !== null,',
       'failureTarget: latestFailureTarget(chat, replayTarget, evidence),',
       'failureCleanupReason: latestFailureCleanupReason(chat, replayTarget, evidence),',
-      cacheHitReturn]
+      cacheHitReturn.slice(cacheHitReturn.indexOf('failureTarget: '))]
     const hasNewPendingForm = source.includes('canRollback: true, canClearIncompleteReply: !!chat.rollbackPending.failureTarget,')
     if (source.split(VIEW_MARKER).length !== 2 || required.some(block => !source.includes(block)) || !hasNewPendingForm) throw new Error('最新失败视图接线不完整')
     return source
@@ -257,10 +316,39 @@ function latestFailureCleanupReason(chat, replayTarget, evidence) {
   // 命中旧rollback缓存也必须重签发当前revision与原因（旧凭据不得续用，说明也不许停在旧视图）。
   next = once(next, 'return {...copyRollback(previous.value),undoRollbackTurn:', cacheHitReturn)
   next = upgradeAuthorNodesLine(next)
-  return next
+  return upgradeIncompleteAvailability(next)
+}
+function upgradeIncompleteAvailability(source) {
+  const stateMarker='// [dsh-tavern-failure-state-input:v1]'
+  if(!source.includes(stateMarker)) {
+    source=once(source,'  function volatileSessionViewFields(chat, activity, changes) {','  '+stateMarker+'\n  function volatileSessionViewFields(chat, activity, changes, evidence) {')
+    source=once(source,'const rollback = rollbackViewFields(chat,undefined,changes)','const rollback = rollbackViewFields(chat,evidence,changes)')
+    const messageHead="export function projectSessionMessage(message) {\n  if (!message || typeof message !== 'object') return message\n  return {\n    role: message.role, turn: message.turn, greeting: message.greeting,"
+    source=once(source,messageHead,messageHead+'\n    // 只携带已保存编辑的精确校验输入，普通楼不读取正文/变量/显示载荷。\n    ...(message.bodyEdit ? {bodyEdit:{id:message.bodyEdit.id,turn:message.bodyEdit.turn},text:message.text} : {}),')
+    const key="'regeneratedDshTurns', 'tavernHelperLifecycleRevision'])"
+    source=once(source,key,"'regeneratedDshTurns', 'tavernHelperLifecycleRevision', 'runtimeInputs', 'foregroundFrames', 'nativeCommits', 'pendingCardChanges', 'compatibilityTraces', 'historyRecallCooldowns', 'worldBookReads', 'rollbackSessionCuts', 'foregroundError', 'promptTemplateInput', 'promptTemplateInitialVariables', 'lastSettle', 'lastWorldBookRecall', 'preparedWorldBook', 'worldBookRandomState'])")
+  } else if(source.split(stateMarker).length!==2 || !source.includes('function volatileSessionViewFields(chat, activity, changes, evidence)') || !source.includes('rollbackViewFields(chat,evidence,changes)') || !source.includes('bodyEdit:{id:message.bodyEdit.id,turn:message.bodyEdit.turn}'))throw new Error('清理只读状态投影接线不完整')
+  const staleCache='canRollback: previous.value.canRollback || latestFailureTarget'
+  if(source.includes(staleCache))source=once(source,staleCache,'canRollback: (previous.value.canRollback && !previous.value.canClearIncompleteReply) || latestFailureTarget')
+  const staleTurn='?.turn ?? previous.value.rollbackTargetTurn'
+  if(source.includes(staleTurn))source=once(source,staleTurn,'?.turn ?? settlementTurn(chat)')
+  const replacements=[
+    ['      canRollback: rollbackState.canRollback,','      canRollback: rollbackState.canRollback || latestFailureTarget(chat, replayTarget, evidence) !== null,'],
+    ['      rollbackTargetTurn: settlementTurn(chat),','      rollbackTargetTurn: latestFailureTarget(chat, replayTarget, evidence)?.turn ?? settlementTurn(chat),'],
+    ['return {...copyRollback(previous.value),failureTarget:', 'return {...copyRollback(previous.value),canRollback: (previous.value.canRollback && !previous.value.canClearIncompleteReply) || latestFailureTarget(chat, previous.value.replayFailedTurn === null ? null : {turn: previous.value.replayFailedTurn}, evidence) !== null,canClearIncompleteReply: latestFailureTarget(chat, previous.value.replayFailedTurn === null ? null : {turn: previous.value.replayFailedTurn}, evidence) !== null,rollbackTargetTurn: latestFailureTarget(chat, previous.value.replayFailedTurn === null ? null : {turn: previous.value.replayFailedTurn}, evidence)?.turn ?? settlementTurn(chat),failureTarget:']
+  ]
+  for(const [old,next] of replacements)if(!source.includes(next))source=once(source,old,next)
+  return source
 }
 
 /** R1：作者 `rollbackViewFields` 的节点推导行 → 冷档回退证据节点。全文件必须**恰一行**，否则拒绝猜测施缝。 */
+function upgradeLatestFailureHelper(source, helper) {
+  if (source.includes('evidence.cleanupIdle !== true')) return source // 已升级（幂等）
+  const hits = source.split(LEGACY_HELPER).length - 1
+  if (hits === 0) return source // 形状未知：交给 required 块检查响亮拒绝，不在这里猜
+  if (hits !== 1) throw new Error('最新失败 helper 旧块不唯一：' + hits)
+  return source.replace(LEGACY_HELPER, helper)
+}
 function upgradeAuthorNodesLine(source) {
   const hits = source.split(AUTHOR_NODES_LINE).length - 1
   const upgraded = source.split(AUTHOR_NODES_NEXT).length - 1

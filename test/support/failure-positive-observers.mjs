@@ -73,7 +73,10 @@ export function registerFailureTests(test, lifecycle) {
     assert.equal(coreClean.inspectNativeFailureTail, coreTarget.inspectNativeFailureTail, 'core clean-rollback 转出的 inspectNativeFailureTail 必须与 failure-cleanup-target 同一函数')
     // index 侧：DI 同时转出证据读口，且证据取用处包成 async（冷档 await 观察口）
     assert.equal(index.includes('get readFailureEvidence() { return readFailureEvidence }'), true, 'index nativeData DI 必须转出 readFailureEvidence getter')
-    assert.equal(index.includes('const rollbackEvidence = await readFailureEvidence'), true, '证据取用处必须 async 包装')
+    assert.equal(index.includes('const rollbackEvidence = { ...await readFailureEvidence(chat.sessionId, chat.id), activity }'), true, '首次视图必须等待当前chat/session的静止证明')
+    assert.equal(index.includes('async function volatileSessionViewFields(chat, activity, changes)'), true, '缓存/dirty必须同样异步取证')
+    assert.equal(index.includes('sessionStateView.volatile(chat, activity, changes, evidence)'), true, '易变视图必须传同一证明')
+    assert.equal(index.split('await volatileSessionViewFields(chat, activity,').length - 1, 2, '缓存和dirty两个真实caller均必须等待')
     // 幂等：同树复跑不变更
     assert.equal(noop.noopResult.changed, false, '复跑必须幂等')
     // 宿主 DI 与失败接线的转换都必须可判定为"已应用"（复跑不重复插入）

@@ -372,12 +372,12 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 	 * 调用方（lib/domain/rollback-cleanup.js）随后必须就地重建宿主 Session 的内存
 	 * 镜像（log/SurfaceManager/投影注册表），三段合起来才等价"那一轮没发过"。
 	 */
-	async truncateEvents(header, boundarySeq, identity) {
+	async truncateEvents(header, boundarySeq, identity, retainedEvents) {
 		this.assertWritable(header.id)
 		await this.drainOpenHandles(header.id)
 		const session = this.store.openExisting(header.id)
 		if (session === undefined) throw new SessionPersistenceNotFoundError(header.id)
-		const meta = session.truncateFrom(boundarySeq, identity)
+		const meta = session.truncateFrom(boundarySeq, identity,retainedEvents)
 		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0)
 		return meta
 	}

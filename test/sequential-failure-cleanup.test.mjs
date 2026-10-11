@@ -224,7 +224,7 @@ async function fixture(readSource,options={}){
   assert.equal(snapshot._storageRevision,undefined,'窗口副本必须无 _storageRevision（作者形状）')
   assert.equal(snapshot.windowRevision,window.revision,'窗口副本必须带同快照 windowRevision')
   return {turn:snapshot.messages.at(-1).turn,variables:snapshot.variables,failureCleanup:window.failureCleanup,
-   failureTarget:latestFailureTarget(snapshot,null,{events:session.snapshotEvents(),session})}
+   failureTarget:latestFailureTarget(snapshot,null,{events:session.snapshotEvents(),session,cleanupIdle:true,activity:window.activity})}
  }
  // 故障点按既有唯一路径：SQL 截断 + 句柄/内存/投影回卷**已完成到 42** 之后，由 sideCleanup 抛一次；pending 仍在
  let sideFault=options.failInSideCleanup===true
@@ -321,10 +321,13 @@ test('拒绝native-only清理：assistant/operation43/非guard文案一律不可
    const before=await f.read(),eventsCount=f.eventCount()
    const found=await f.nativeTarget()
    if(extra==='completed'){
-    // 成功轮：helper 不得给目标，且 reason 本来为空（不得显示 guard 文案）
+    // 原生completed但业务未登记不是成功业务轮；缺静止证明必须拒，并如实说明，不伪装可清。
     assert.equal(found.cleanable,false,label+' ⇒ 必须不可 native 清理')
     assert.equal(found.target,null,label+' ⇒ 不得给 target')
-    assert.equal(found.reason,'',label+' ⇒ 未改文案的分支 reason 必须为空')
+    assert.match(found.reason,/尚未确认全部停止/,label+' ⇒ 未登记完成尾仍必须先有静止证明')
+     const idleFound=inspectNativeFailureTail(before,{events:f.session.snapshotEvents(),session:f.session,cleanupIdle:true,activity:{phase:'idle',busy:false}},before._storageRevision)
+     assert.equal(idleFound.cleanable,false);assert.equal(idleFound.target,null)
+     assert.match(idleFound.reason,/前轮正文、结算与完成检查点不一致/,label+' ⇒ 即便静止也不得跨过失败业务42猜恢复像')
    }else if(helperPattern){
     assert.equal(found.cleanable,false,label+' ⇒ 必须不可 native 清理')
     assert.equal(found.target,null,label+' ⇒ 不得给 target')

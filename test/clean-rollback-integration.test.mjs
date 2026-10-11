@@ -11,7 +11,7 @@ import os from 'node:os'
 import vm from 'node:vm'
 import {SqliteSessionDb} from '../store.js'
 import {createChatSqliteStore} from '../chat-sqlite-store.js'
-import {cleanRollback} from '../lib/clean-rollback.js'
+import {cleanRollback,inspectNativeFailureTail} from '../lib/clean-rollback.js'
 import {installRollbackSync} from '../lib/rollback-sync.js'
 import {applyRowTimelineTransform} from '../deploy/row-rollback-transform.mjs'
 import {configureRollbackCleanup,cleanupAfterRollbackAtSeq} from '../lib/rollback-cleanup.js'
@@ -40,7 +40,10 @@ helpers.diffJson=(old,next)=>{
 async function fixture(failed=false,withBook=false){
  const root=mkdtempSync(path.join(os.tmpdir(),'tavern-clean-rollback-'))
  const raw=readFileSync(new URL('../../../tmp/projection-baseline-1001/clean-session.js',import.meta.url),'utf8').replace(/from "(@deepseek-ai\/[^\"]+)"/g,(_all,name)=>'from '+JSON.stringify(pathToFileURL(requireHost.resolve(name)).href))
- const file=path.join(root,'session.mjs');writeFileSync(file,raw,'utf8');const {Session}=await import(pathToFileURL(file).href)
+ // 与实际host-session-patch相同，只准assistant替换携带引用；不是跳过整套校验。
+  const patched=raw.replace('if (event.type === "assistant/message" && raw !== void 0) throw','if (event.type === "assistant/message" && raw !== void 0 && event.surfaceOp?.op !== "replace") throw')
+  const file=path.join(root,'session.mjs');writeFileSync(file,patched,'utf8');const {Session,KNOWN_SESSION_EVENT_TYPES}=await import(pathToFileURL(file).href)
+  KNOWN_SESSION_EVENT_TYPES.add('dsh-tavern/required-session-patch-v1')
  const {SessionProjectionRegistry}=await import(pathToFileURL(requireHost.resolve('@deepseek-ai/dsh-session-projection')).href)
  const {Context}=await import(pathToFileURL(requireHost.resolve('@deepseek-ai/cordis')).href),{z}=await import(pathToFileURL(requireHost.resolve('zod')).href)
  const ctx=new Context(),projections=new SessionProjectionRegistry(ctx)
@@ -49,7 +52,7 @@ async function fixture(failed=false,withBook=false){
  background.append('session/end-seed',{})
  function turn(s,n,text,reason='completed'){
   s.append('turn/start',{turn:n});s.append('user/message',{id:'u'+n,role:'user',content:[{type:'text',text:'输入'+text}],source:{kind:'user'}},{surfaceOp:'append'})
-  s.append('assistant/message',{turn:n,step:1,message:{id:'a'+n,role:'assistant',content:[{type:'text',text}],source:{kind:'model',provider:'fixture',model:'fixture'}},stream:[]},{surfaceOp:'append'})
+  s.append('assistant/message',{turn:n,step:1,message:{id:'a'+n,role:'assistant',content:[{type:'reasoning',text:'原创思考'},{type:'text',text}],source:{kind:'model',provider:'fixture',model:'fixture'}},stream:[]},{surfaceOp:'append'})
   s.append('turn/end',{turn:n,reason:{kind:reason}})
  }
  turn(session,52,'上一轮52');const keep=session.seq
@@ -70,7 +73,7 @@ async function fixture(failed=false,withBook=false){
  const handles=new Set([...agents].map(([id,a])=>({id,access:'write',state:{cursor:a.session.seq,primed:{text:'旧53'}},observedLength:a.session.seq})))
  const dbs=new Map([[session.id,mainDb],[background.id,workerDb]])
  let fault=false
- const persistence={bindRollbackArchive:async(id,file)=>dbs.get(id).bindRollbackArchive(file),setRollbackPending:async(id,value)=>dbs.get(id).setRollbackPending(value),drainOpenHandles:async()=>{},truncateEvents:async(header,boundary)=>{if(fault&&header.id===background.id)throw Error('原创故障点');const db=dbs.get(header.id),meta=db.truncateFrom(boundary);rewindRollbackHandles(handles,header.id,meta.eventCount);return meta}}
+ const persistence={bindRollbackArchive:async(id,file)=>dbs.get(id).bindRollbackArchive(file),setRollbackPending:async(id,value)=>dbs.get(id).setRollbackPending(value),drainOpenHandles:async()=>{},truncateEvents:async(header,boundary,identity,retainedEvents)=>{if(fault&&header.id===background.id)throw Error('原创故障点');const db=dbs.get(header.id),meta=db.truncateFrom(boundary,identity,retainedEvents);rewindRollbackHandles(handles,header.id,meta.eventCount);return meta}}
  for(const agent of agents.values())agent.inbox={nextTurn:[],nextStep:[]}
  const syncFrames=[];let rollbackSync
  installRollbackSync({get:()=>({controlState:{ctx:{sessionProjections:projections},jobsFor:()=>[],broadcast:frame=>syncFrames.push(frame)},history:{assistantStreams:new Map()}}),provide:(_key,value)=>{rollbackSync=value}})
@@ -463,5 +466,88 @@ test('普通目标身份安全：错branch/错rev/异档/写后过期全拒且�
   assert.equal(final._storageRevision,staleRevision,'过期目标不得写业务')
   assert.equal(f.mainDb.cursor(),staleCursor)
   assert.equal(archiveRows(f.root,f.base.id,'archive_messages',2),staleArchive)
+ }finally{await f.cleanup()}
+})
+
+test('不完整清理拒绝：运行器、后台pending与目标坐标漂移在取消或写库前零副作用',async()=>{
+ const f=await fixture(false)
+ try {
+   await f.update(f.base.id,current=>({...f.base,_storageRevision:current._storageRevision+1,timeline:{...f.base.timeline,participants:{background:{sessionId:f.background.id,turn:52}},operations:{body52:{kind:'body',turn:52,status:'completed',background:{phase:'completed'}}},checkpoints:[{turn:52}]}}))
+   const chat=await f.read(),target=inspectNativeFailureTail(chat,{session:f.session,events:f.session.snapshotEvents(),cleanupIdle:true}).target
+   assert.ok(target?.incomplete)
+   let quiesced=0,stopped=0
+   const foreground=f.agents.get(f.session.id);foreground.cancel=()=>{stopped++};foreground.whenIdle=async()=>{}
+   const services={...f.args.services,isFailureCleanupIdle:()=>true},events=f.session.snapshotEvents()
+   const invoke=(failureTarget=target,overrides={})=>cleanRollback({...f.args,chat,requestedTurn:failureTarget,services,quiesce:async()=>{quiesced++},...overrides})
+   foreground.phase.kind='running';await assert.rejects(invoke(),/活动/);foreground.phase.kind='idle'
+   await assert.rejects(invoke(target,{services:{...services,isFailureCleanupIdle:()=>false}}),/静止/)
+   const backend=f.agents.get(f.background.id);backend.phase.kind='running';await assert.rejects(invoke(),/活动/);backend.phase.kind='idle'
+   const pending=structuredClone(chat);pending.timeline.operations.body52.committedBranchId=pending.timeline.branchId;pending.timeline.operations.body52.background.phase='pending'
+   await assert.rejects(invoke(target,{chat:pending}),/静止/)
+   assert.equal(quiesced,0);assert.equal(stopped,0)
+   for(const change of [{branchId:'other'},{revision:target.revision+1},{endSeq:target.endSeq+1,eventCount:target.eventCount+1},{incomplete:undefined}])await assert.rejects(invoke({...target,...change}),/变化|漂移|状态|失败结束|不是 failed|坐标|尚未确认全部停止/)
+   assert.deepEqual(await f.read(),chat);assert.deepEqual(f.session.snapshotEvents(),events);assert.equal(f.syncFrames.length,0)
+ }finally{await f.cleanup()}
+})
+test('不完整清理A：native53完成但业务未登记时按纯尾前缀签incomplete且业务保持52',async()=>{
+ const f=await fixture(false)
+ try{
+  // 退回"上一轮52完成"：无 body53/无 message53/无 checkpoint53，保留 52 的业务基准与检查点
+  await f.update(f.base.id,current=>{const baseline=current.timeline.operations.body.businessBefore
+   return {...f.base,_storageRevision:current._storageRevision+1,messages:[...f.base.messages],variables:{hp:52},
+    timeline:{...f.base.timeline,revision:52,operations:{body52:{kind:'body',turn:52,status:'completed',background:{phase:'completed'},businessBefore:baseline}},checkpoints:[{id:'cp52',turn:52,businessBefore:baseline}]}}})
+  const services={...f.args.services,isFailureCleanupIdle:()=>true}
+  const editId='tavern-body-edit:synthetic'
+   await f.update(f.base.id,current=>{current.messages[1]={...current.messages[1],text:'上轮独立编辑',bodyEdit:{id:editId,turn:52,seq:2}};return current})
+   const editStart=f.session.seq
+   f.session.append('dsh-tavern/required-session-patch-v1',{version:1})
+   f.session.append('assistant/message',{turn:52,step:1,message:{id:editId,role:'assistant',content:[{type:'text',text:'上轮独立编辑'}],source:{kind:'model',provider:'dsh-tavern',model:'body-edit'}}},{surfaceOp:{op:'replace',startSeq:2,endSeq:2},sourceEventSeqs:[2]})
+   f.mainDb.appendBatch(f.session.snapshotEvents(editStart),editStart)
+   const retained=f.session.snapshotEvents().slice(editStart).map((e,i)=>({...e,seq:f.keep+i}))
+   services.preserveRetainedBodyEdits=true
+   const chat=await f.read(),failureTarget=inspectNativeFailureTail(chat,{session:f.session,events:f.session.snapshotEvents(),cleanupIdle:true}).target
+   assert.ok(failureTarget?.incomplete)
+   const prefix=f.session.snapshotEvents().slice(0,f.keep),backgroundBefore=f.background.snapshotEvents()
+   const result=await cleanRollback({...f.args,chat,services,requestedTurn:failureTarget})
+  const after=await f.read()
+  assert.equal(result.turn,52,'A：清理到上一正确轮 52')
+  assert.equal(f.mainDb.cursor(),f.keep+2,'A：native53物理删除，前缀和独立编辑保留')
+  assert.deepEqual(f.background.snapshotEvents(),backgroundBefore,'A：独立后台原样保留')
+   assert.deepEqual(f.session.snapshotEvents(),[...prefix,...retained],'A：原生前缀逐事件保持且旧编辑精确保留')
+    assert.equal(after.messages[1].text,'上轮独立编辑')
+    assert.equal(f.session.surface.nodes.includes(f.keep+1),true,'编辑替换保持模型面')
+    assert.equal(f.session.surface.nodes.includes(2),false)
+   assert.equal(f.agents.get(f.session.id).phase.lastTurn,52)
+   assert.equal([...f.handles].find(handle=>handle.id===f.session.id).state.cursor,f.keep+2)
+   assert.ok(f.syncFrames.length>0)
+  assert.deepEqual({...after.variables},{hp:52},'A：变量仍是 52（未登记轮不产生新变量）')
+  assert.equal(after.messages.length,2,'A：消息前缀仍为 2 行')
+  assert.equal(after.timeline.operations.body52.kind,'body','A：52 的业务操作保留')
+  assert.equal(after.timeline.operations.body,undefined,'A：未登记的 53 不得留下业务残留')
+ }finally{await f.cleanup()}
+})
+
+test('不完整清理B：正常body53后台failed时按ordinary回退恢复52并清后台种子',async()=>{
+ const f=await fixture(false)
+ try{
+  const bgId=f.background.id
+  // 正常完成轮：不改 body.status（不迎合）、不签 incomplete；只让 body 的后台相位停在 failed
+  await f.update(f.base.id,current=>{current.timeline.operations.body.background={phase:'failed'}
+   current.timeline.operations.body.committedBranchId=current.timeline.branchId
+   // 后台错误取真实 body.background，不另造 chat 后台状态。
+   current.rollbackSessionCuts={'53':{[bgId]:0}}
+   return current})
+  const services={...f.args.services,isFailureCleanupIdle:()=>true}
+  const chat=await f.read()
+  const prefix=f.session.snapshotEvents().slice(0,f.keep),backgroundBefore=f.background.snapshotEvents()
+  const result=await cleanRollback({...f.args,chat,services,requestedTurn:53})
+  const after=await f.read()
+  assert.equal(result.turn,52,'B：ordinary 回退到上一轮 52')
+  assert.equal(f.workerDb.cursor(),1,'B：后台失败尾物理删尽，只留种子')
+  assert.equal(after.timeline.operations.body,undefined,'B：body53 撤净')
+  assert.deepEqual({...after.variables},{hp:52},'B：按 businessBefore 恢复变量 52')
+  assert.equal(after.messages.length,2,'B：消息恢复到前缀 2 行')
+  assert.equal(f.syncFrames.length>=1,true,'B：同连接同步帧已广播')
+  assert.deepEqual(f.session.snapshotEvents(),prefix,'B：原生前缀逐事件保持')
  }finally{await f.cleanup()}
 })

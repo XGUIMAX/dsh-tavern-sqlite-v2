@@ -94,7 +94,11 @@ test('最新失败接线：RPC与投影幂等及缺块拒绝', async () => {
   assert.equal(applyLatestFailureHostTransform(hostOnce), hostOnce, '宿主复跑必须幂等')
   assert.throws(() => applyLatestFailureHostTransform(hostOnce.replace(FAILURE_RPC, 'args.expectedTurn')), /不完整/, '缺 RPC 改动必须拒')
   assert.throws(() => applyLatestFailureHostTransform(hostOnce + '\n// [dsh-tavern-latest-failure-host:v1]\n'), /不完整/, '标记重复必须拒')
-  assert.throws(() => applyLatestFailureHostTransform(indexRaw.replace("case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn) }", '')), /锚点缺失\/不唯一/, '锚点缺失必须拒')
+  // 真作者 index 的 rollbackTurn 是 multiline 分支（index.js:4386-4387）：按真实缩进文本唯一 mutate，先证命中再拒
+  const rpcAnchor = "      case 'rollbackTurn': {\n        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn)"
+  const brokenRpc = indexRaw.replace(rpcAnchor, '')
+  assert.notEqual(brokenRpc, indexRaw, '替换必须命中真实 multiline RPC 锚（防"替换没命中"的假缺块）')
+  assert.throws(() => applyLatestFailureHostTransform(brokenRpc), /锚点缺失\/不唯一/, '锚点缺失必须拒')
   // 视图：真完整 chat-session-state source；失败视图接缝接在**既有 pending 视图转换产物**之后（真实标准组合顺序）
   const viewRaw = applyRollbackPendingViewTransform(readLatestFailureSource(VIEW_REL))
   const viewOnce = applyLatestFailureViewTransform(viewRaw)
@@ -304,7 +308,14 @@ function failureHelpers(source, deps = null) {
   const text = extractFunction(source, 'function latestFailureTarget(chat, replayTarget, evidence) {')
     + '\n' + extractFunction(source, 'function latestFailureCleanupReason(chat, replayTarget, evidence) {')
     + '\nreturn { latestFailureTarget, latestFailureCleanupReason }'
-  return new Function(...names, text)(...names.map(name => deps[name]))
+  const production = new Function(...names, text)(...names.map(name => deps[name]))
+  // 这些旧夹具只提供只读事件，没有启动前后台运行器；显式补充该隔离条件。
+  // 有活动旗的输入原样优先；运行器活动/缺证明的生产拒绝由 incomplete-round-cleanup 独立覆盖。
+  const fixtureEvidence = evidence => ({cleanupIdle:true,foregroundActive:false,backgroundActive:false,...evidence})
+  return {
+    latestFailureTarget: (chat,replay,evidence) => production.latestFailureTarget(chat,replay,fixtureEvidence(evidence)),
+    latestFailureCleanupReason: (chat,replay,evidence) => production.latestFailureCleanupReason(chat,replay,fixtureEvidence(evidence)),
+  }
 }
 /** 真实事件形状的**终止失败证据**：最新 turn/start 之后同轮出现 turn/end 且 reason=error/aborted。
  *  新 guard 只认这一种生命周期才会签新 body 目标；active/completed/无事件都不许签。 */
@@ -768,7 +779,7 @@ test('活动轮失败提示：生成中不签目标且失败结束后才可清�
     assert.equal(upgradedPrior, wired, '已施当前代源码升级后必须与本次产物逐字一致')
     assert.equal(applyLatestFailureViewTransform(upgradedPrior), upgradedPrior, '已施当前代升级必须幂等')
     // 真实 actual-044 源迁移：旧 marked helper 整段字面换成新 helper，再 apply 必须幂等
-    const actual44 = readFileSync(new URL('../../../tmp/repair-044-active-20261010/chat-session-state-188.js', import.meta.url), 'utf8')
+    const actual44 = activeSource(readFileSync(new URL('../../../tmp/repair-044-active-20261010/chat-session-state-188.js', import.meta.url), 'utf8'), VIEW_REL)
     assert.ok(actual44.includes('// [dsh-tavern-latest-failure-view:v1]'), 'actual-044 源必须带 view marker')
     const migratedOnce = applyLatestFailureViewTransform(actual44)
     assert.ok(migratedOnce.includes('const failureEnding = (source) => {'), '迁移后必须带新 helper（LEGACY_HELPER 整段替换）')

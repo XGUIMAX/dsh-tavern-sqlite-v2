@@ -22,6 +22,9 @@ const BODY=`${START}
   }
 
 `
+const IDLE_PROVIDER = '        isFailureCleanupIdle,\n        preserveRetainedBodyEdits: true,\n'
+const UPGRADED_BODY = body => body.replace('      services: {\n','      services: {\n' + IDLE_PROVIDER)
+const IDLE_SIGNATURE = 'rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides, isFailureCleanupIdle })'
 const SYNC_BODY=BODY.replace('webServerProvider: () => typeof webServerProvider === \'function\' ? webServerProvider() : webServerProvider,', 'rollbackSyncProvider: () => typeof rollbackSyncProvider === \'function\' ? rollbackSyncProvider() : rollbackSyncProvider,')
 // 新作者布局直接接最终消费者；不先修补随即会删除的软回退/历史窗口路径。
 export function applyLatestCleanRollbackTransform(source) {
@@ -43,12 +46,15 @@ export function applyLatestCleanRollbackTransform(source) {
 export function applyCleanRollbackTransform(source) {
  if (source.includes(MARKER) && (source.split(MARKER).length!==2 || source.split(START).length!==2 || source.split(END).length!==2)) throw new Error('统一物理回退消费者重复/边界不唯一')
  if (source.includes('rollbackSyncProvider')) {
-  if(!source.includes(SYNC_BODY) || source.split('rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })').length!==2) throw new Error('同连接统一回退消费者不完整')
-  return applyRegenerationRollbackTransform(source)
+  const signature='rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })'
+   if(source.includes('        isFailureCleanupIdle,\n') && !source.includes('preserveRetainedBodyEdits: true'))source=source.replace('        isFailureCleanupIdle,\n',IDLE_PROVIDER)
+  if(source.includes(UPGRADED_BODY(SYNC_BODY)) && source.split(IDLE_SIGNATURE).length===2)return applyRegenerationRollbackTransform(source)
+  if(!source.includes(SYNC_BODY) || source.split(signature).length!==2)throw new Error('同连接统一回退消费者不完整')
+  return applyRegenerationRollbackTransform(source.replace(SYNC_BODY,()=>UPGRADED_BODY(SYNC_BODY)).replace(signature,IDLE_SIGNATURE))
  }
  const legacy=applyLegacyCleanRollbackTransform(source)
  if(legacy.split(BODY).length!==2 || legacy.split('webServerProvider, variableStore, quiesceRollback, cleanupRollbackSides })').length!==2)throw new Error('同连接统一回退升级锚点不唯一')
- return applyRegenerationRollbackTransform(legacy.replace(BODY,SYNC_BODY).replace('webServerProvider, variableStore, quiesceRollback, cleanupRollbackSides })','rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })'))
+ return applyRegenerationRollbackTransform(legacy.replace(BODY,()=>UPGRADED_BODY(SYNC_BODY)).replace('webServerProvider, variableStore, quiesceRollback, cleanupRollbackSides })',IDLE_SIGNATURE))
 }
 function applyLegacyCleanRollbackTransform(source) {
  // 外层不能先resume：统一编排已负责活/冷Session，resume的end-seed会被持久屏障拒绝。
