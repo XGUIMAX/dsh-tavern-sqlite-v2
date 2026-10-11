@@ -36,7 +36,7 @@ async function fixture(header=true){
  assert.equal(applyRollbackBodySignalTurnTransform(source),source)
  source=applyRollbackBodyCommitTurnTransform(source);assert.equal(applyRollbackBodyCommitTurnTransform(source),source)
  source=source.replace("import { CARD_MEMORY_TOOLS } from '../../packages/dsh-tavern-card-memory/index.js'",'const CARD_MEMORY_TOOLS=[] // 此测试仅story，不访问card工具')
- source=rewrite(source).replace(new URL('chat-persistence.js',author).href,pathToFileURL(path.join(root,'persistence.mjs')).href).replace(new URL('storage-rollback-business.js',author).href,new URL('../lib/rollback-business-state.js',import.meta.url).href)
+ source=rewrite(source).replace(new URL('chat-persistence.js',author).href,pathToFileURL(path.join(root,'persistence.mjs')).href).replace(new URL('storage-rollback-business.js',author).href,new URL('../lib/rollback-business-state.js',import.meta.url).href).replace(new URL('storage-failure-state.js',author).href,new URL('../lib/failure-state.js',import.meta.url).href)
  const turn=await import(module('turn',source))
  const helpers={...await import(new URL('copy-json-tree.js',author)),...await import(new URL('json-mutation.js',author)),...await import(new URL('chat-session-state.js',author)),...await import(new URL('tavern-helper-context.js',author)),...await import(new URL('scoped-messages.js',author))}
  const archive=createChatSqliteStore({dataRoot:root,helpers}),chatPersistence=persistence.createChatPersistence({store:archive}),global=createRollbackGlobalVariables({dataRoot:root,profileData:{readJson:async()=>undefined,remove:async()=>{}},archiveForChat:id=>archive.rollbackArchivePath(id)})

@@ -80,6 +80,8 @@ helpers.diffJson=(old,next)=>{
 // 全合成身份（不复制现场）
 const CHAT_ID='chat-seq-fixture'
 const GUARD='失败正文必须先统一物理清理，再准备新回合；禁止直接重试覆盖回退基准'
+/** 宿主请求扩展准备失败的真实文案（inspectNativeFailureTail 的扩展判据按逐字比对）。 */
+const REQUEST_EXTENSION_MESSAGE='DeepSeek request extension preparation failed'
 /** 57 条正文：56 条交替（assistant turn1..28）+ 尾 assistant turn41（与失败清理现场同形）。 */
 function rows57(){
  const rows=Array.from({length:56},(_v,index)=>index%2===0
@@ -107,9 +109,43 @@ async function fixture(readSource,options={}){
  const session=Session.create('session-seq-fixture')
  const userRow=(n,text)=>session.append('user/message',{id:'u'+n,role:'user',content:[{type:'text',text}],source:{kind:'user'}},{surfaceOp:'append'})
  const assistantRow=(n,text)=>session.append('assistant/message',{turn:n,step:1,message:{id:'a'+n,role:'assistant',content:[{type:'text',text}],source:{kind:'model',provider:'fixture',model:'fixture'}},stream:[]},{surfaceOp:'append'})
- function completedTurn(n,text){session.append('turn/start',{turn:n});userRow(n,text);assistantRow(n,text);session.append('turn/end',{turn:n,reason:{kind:'completed'}})}
+ const extension=options.requestExtension===true
+ /** 旧 foreground-frame 的 messageId/trace：42 替换它、43 只有 append。 */
+ const frame={chatId:CHAT_ID,operationId:'op-foreground-41',turn:41}
+ const frameSource=()=>({kind:'plugin',plugin:'dsh-tavern',form:'foreground-frame',trace:{chatId:frame.chatId,operationId:frame.operationId,turn:frame.turn}})
+ let oldFrameSeq=null
+ const code=options.requestErrorCode??'REQUEST_EXTENSION'
+ const message=options.requestErrorMessage??REQUEST_EXTENSION_MESSAGE
+ const failure=()=>({code,message})
+ /** 纯未发请求终止：唯一 chunk/finish/error 帧；streamText 只在负例里出现。 */
+ const finishFrame=()=>{
+  const frames=[{type:'chunk',chunk:{type:'finish',reason:{kind:'error',failure:failure()}}}]
+  if(options.streamText)return [...frames,{type:'chunk',chunk:{type:'text',text:'不该有的文本'}}]
+  return frames
+ }
+ /** 42 现场形状（扩展失败）：user 输入 + 旧 foreground-frame 替换（新 append 在本轮、引用前轮 append），无正文/无输出。 */
+ function extensionReplacementTurn(n,text){
+  session.append('turn/start',{turn:n})
+  userRow(n,text)
+  session.append('user/message',{id:'u-frame-42',role:'user',content:[],source:{...frameSource(),trace:{...frameSource().trace,frameId:'frame-41'}}},{surfaceOp:{op:'replace',startSeq:oldFrameSeq,endSeq:oldFrameSeq},sourceEventSeqs:[oldFrameSeq]})
+  session.append('step/start',{turn:n,step:1})
+  session.append('assistant/attempt',{turn:n,step:1,stream:finishFrame()})
+  session.append('step/end',{turn:n,step:1})
+  session.append('turn/end',{turn:n,reason:{kind:'error',error:failure()}})
+ }
+ /** 43 现场形状（扩展失败）：只有 user append（无替换、无正文、无输出）。 */
+ function extensionAppendTurn(n,text){
+  session.append('turn/start',{turn:n})
+  userRow(n,text)
+  if(options.extraStep43===true){session.append('step/start',{turn:n,step:1});session.append('step/start',{turn:n,step:2})}
+  else session.append('step/start',{turn:n,step:1})
+  session.append('assistant/attempt',{turn:n,step:1,stream:finishFrame()})
+  session.append('step/end',{turn:n,step:1})
+  session.append('turn/end',{turn:n,reason:{kind:'error',error:failure()}})
+ }
+ function completedTurn(n,text){session.append('turn/start',{turn:n});userRow(n,text);assistantRow(n,text);if(extension){const previous=session.append('user/message',{id:'u-frame-41',role:'user',content:[{type:'text',text:'旧临时上下文'}],source:{...frameSource(),trace:{...frameSource().trace,frameId:'frame-41'}}},{surfaceOp:'append'});oldFrameSeq=previous.seq}session.append('turn/end',{turn:n,reason:{kind:'completed'}})}
  // 42 现场形状：真实 aborted + 两条 user/message（失败正文轮）
- function failedBodyTurn(n,text){session.append('turn/start',{turn:n});userRow(n,text);userRow(n,text+'（重发）');session.append('turn/end',{turn:n,reason:{kind:'aborted',reason:{kind:'user'}}})}
+ function failedBodyTurn(n,text){session.append('turn/start',{turn:n});userRow(n,text);userRow(n,text+'（重发）');if(options.body42Ending==='active')return;if(options.body42Ending==='completed')session.append('turn/end',{turn:n,reason:{kind:'completed'}});else session.append('turn/end',{turn:n,reason:{kind:'aborted',reason:{kind:'user'}}})}
  // 43 现场形状：**没有 user/message**；两处 agent/inbox/spliced（一在 43 段之前、一在 turn/start 之后），无 start/end 事件
  function nativeGuardTurn(n){
   if(options.withToolCall43)session.append('tool/call',{turn:n,name:'fixture-tool',input:{}})
@@ -124,13 +160,24 @@ async function fixture(readSource,options={}){
  completedTurn(41,'输入41')
  if(options.seedAfter41){session.append('session/end-seed',{});session.append('session/end-seed',{})}
  const mainDb=new SqliteSessionDb(path.join(root,'session.db'))
+ const with43=options.with43!==false                     // 默认 true：既有叶（含 43 guard 段）完全不变
  const keep41=session.seq                    // 42 段之前（= 41 完成 + 其后 seed）
- session.append('agent/inbox/spliced',{inserted:[]})   // 43 段之前的 spliced（现场 491 形状；无 turn 归属）
- failedBodyTurn(42,'输入42')
- if(!options.seedAfter41){session.append('session/end-seed',{});session.append('session/end-seed',{})}
- const keep42=session.seq                    // 43 段之前（含 42 全段、seed 与 before-43 spliced）
- const before43=session.seq                  // 43 段起点下标（供 prefix 切片，不用常数）
- nativeGuardTurn(43)
+ if(with43)session.append('agent/inbox/spliced',{inserted:[]})   // 43 段之前的 spliced（现场 491 形状；无 turn 归属）
+ let keep42,before43
+ // 扩展失败形状：42 带严格旧 frame 替换、43 只有 user append（options.requestExtension 默认关闭，既有叶完全不变）
+ if(extension){
+  extensionReplacementTurn(42,'输入42')
+  if(!options.seedAfter41){session.append('session/end-seed',{});session.append('session/end-seed',{})}
+  keep42=session.seq
+  before43=session.seq
+  if(with43)extensionAppendTurn(43,'输入43')
+ }else{
+  failedBodyTurn(42,'输入42')
+  if(!options.seedAfter41){session.append('session/end-seed',{});session.append('session/end-seed',{})}
+  keep42=session.seq                    // 43 段之前（含 42 全段、seed 与 before-43 spliced）
+  before43=session.seq                  // 43 段起点下标（供 prefix 切片，不用常数）；with43=false 时即 42 尾
+  if(with43)nativeGuardTurn(43)
+ }
  // 一次 materialize 全量（内存与库同为完整 seq 轴；helper 的 seq===index 因此成立）
  mainDb.materialize(session.header,session.inheritedEventCount,session.snapshotEvents())
  const storedEvents=()=>mainDb.readAll().events
@@ -139,10 +186,10 @@ async function fixture(readSource,options={}){
  const chatBase={id:CHAT_ID,sessionId:session.id,_storageRevision:1,mode:'story',backgroundConfigVersion:1,conversationFeaturesVersion:1,cardPath:'cards/seq-fixture.json',messages,variables:{hp:41},lastWorldBookRecall:{turn:41},contextCompaction:{warning:'轮41'},hiddenDshErrorTurns:[],unknownBusiness:'用户独立编辑保留',timeline:{schemaVersion:1,branchId:'branch-seq-fixture',revision:41,checkpoints:[],operations:{},participants:{}}}
  const capture=captureRollbackBusinessState(chatBase)
  assert.equal(capture.version,1,'真 captureRollbackBusinessState 必须给 version 1 基准')
- assert.equal(capture.messageCount,57,'基准正文前缀必须是 57（42 没 append）')
+ assert.equal(capture.messageCount,57,'基准正文前缀必须是 57（两形状的 42/43 都不产生正文行）')
  const op42={id:'op42',kind:'body',turn:42,status:'failed',basedOn:{branchId:'branch-seq-fixture',revision:41},beforeParticipants:{},...(options.withoutBaseline42?{}:{businessBefore:capture})}
- const operations=options.withOperation43?{op43:{id:'op43',kind:'body',turn:43,status:'failed'},op42}:{op42}
- const checkpoints=options.withCheckpoint43?[{id:'cp43',turn:43,businessBefore:capture}]:[]
+ const operations=extension?{}:(options.withOperation43?{op43:{id:'op43',kind:'body',turn:43,status:'failed'},op42}:{op42})
+ const checkpoints=extension?[{id:'cp41',turn:41,businessBefore:capture}]:(options.withCheckpoint43?[{id:'cp43',turn:43,businessBefore:capture}]:[])
  const chatId=CHAT_ID                        // store 永远用本档 id；foreign 身份只在"送出的目标"上构造
  // 真 store 两段写：先落基准档（供 readOpeningWindow），再挂 failed body42（revision 连续 +1）
  await store.update(chatId,()=>chatBase)
@@ -330,11 +377,84 @@ test('native-only清理后旧43目标重试不得误清42：stale坐标/过期�
   assert.ok(afterStale.timeline.operations.op42,'stale 坐标拒绝后 42 必须仍在')
   assert.equal(f.eventCount(),counts,'stale 坐标拒绝后事件数不变')
   // ③ 之后 42 必须仍可正常清（证明上一步没把 42 弄成不可清）；目标由真实 view 助手给出
-  const target42=(await f.view(afterStale)).failureTarget
-  assert.equal(target42?.operationId,'op42','旧 43 重试后真实 view 必须仍给出 42 的正文目标')
+  const target42=(await f.view()).failureTarget
+  assert.equal(target42?.operationId,'op42','真实视图必须重新给出42目标')
   const result=await cleanRollback({...await f.fresh(),failureTarget:target42})
   assert.equal(result.turn,41,'42 仍须可清并停在 41')
   assert.equal(f.lastTurn(),41)
+ }finally{await f.cleanup()}
+})
+
+// 真实桌面 7/8 连续形状：REQUEST_EXTENSION「DeepSeek request extension preparation failed」纯失败轮（无 body/无正文/无输出）。
+// 42 带严格旧 foreground-frame 替换（新 append 在 42 内、引用 41 的 append），43 只有 user append；两轮 user 均 source.kind='user'。
+// 新判据：只有无文本/思考/工具/未知/其他 finish 的唯一 attempt、唯一 step 1，且无本轮 op/正文行/检查点/运行数据时才可清。
+test('扩展准备失败清理：扩展纯失败42/43可清且停在41、前缀与旧frame替换不改、负例按新判据拒',async()=>{
+ const f=await fixture(readAuthorSource,{requestExtension:true,seedAfter41:true})
+ try{
+  const inspect=await loadInspectNativeFailureTail(),before=await f.read(),events=f.session.snapshotEvents()
+  const head=events.slice(0,f.before43),prefix=events.slice(0,f.keep41)
+  const replacement=head.find(event=>event.surfaceOp?.op==='replace')
+  assert.ok(replacement)
+  assert.deepEqual(replacement.data.content,[])
+  assert.notEqual(replacement.data.id,head[replacement.sourceEventSeqs[0]].data.id,'作者退役生成新消息ID')
+  assert.deepEqual(replacement.data.source.trace,head[replacement.sourceEventSeqs[0]].data.source.trace,'作者退役保留旧trace')
+  assert.equal(inspect(before,{events:head}).cleanable,true,'42旧上下文退役是可重折的纯尾')
+  assert.equal(inspect(before,{events}).cleanable,true,'43无输出扩展失败可清')
+  const mutate=(input,type,turn,change)=>{
+   const copy=structuredClone(input),event=copy.find(item=>item.type===type&&Number(item.data?.turn)===turn)
+   assert.ok(event);change(event);return copy
+  }
+  const rejected=(chat,input,label)=>assert.equal(inspect(chat,{events:input}).cleanable,false,label)
+  for(const [label,change]of [
+   ['acceptance失败不能冒认请求前失败',event=>{event.data.reason.error.message='DeepSeek request extension acceptance failed'}],
+   ['错误码必须匹配',event=>{event.data.reason.error.code='SERVER'}],
+  ])rejected(before,mutate(events,'turn/end',43,change),label)
+  for(const [label,change]of [
+   ['输出文本',event=>{event.data.stream.push({type:'chunk',chunk:{type:'text',text:'输出'}})}],
+   ['第二步',event=>{event.data.step=2}],
+   ['成功终止帧',event=>{event.data.stream[0].chunk.reason={kind:'completed'}}],
+  ])rejected(before,mutate(events,'assistant/attempt',43,change),label)
+  rejected(before,mutate(events,'step/end',43,event=>{event.type='tool/call'}),'工具调用不能空清')
+  for(const [label,change]of [
+   ['替换非空正文',event=>{event.data.content=[{type:'text',text:'正文'}]}],
+   ['替换跨档',event=>{event.data.source.trace.chatId='foreign-fixture'}],
+   ['替换新frame',event=>{event.data.source.trace.frameId='new-frame'}],
+   ['替换引用越界',event=>{event.surfaceOp.startSeq=head.length;event.surfaceOp.endSeq=head.length;event.sourceEventSeqs=[head.length]}],
+  ]){const copy=structuredClone(head);change(copy.find(event=>event.surfaceOp?.op==='replace'));rejected(before,copy,label)}
+  for(const [label,change]of [
+   ['已有正文操作仍走基准',chat=>{chat.timeline.operations.op43={kind:'body',turn:43,status:'failed'}}],
+   ['已有检查点',chat=>{chat.timeline.checkpoints.push({turn:43})}],
+   ['已有正文行',chat=>{chat.messages.push({role:'assistant',turn:43,text:'正文'})}],
+   ['已有业务数据',chat=>{chat.runtimeInputs={'43':{turn:43}}}],
+  ]){const chat=structuredClone(before);change(chat);rejected(chat,events,label)}
+  // 真实后端拒绝须由本轮业务证据触发，目标用修改后的同revision，不能只测旧目标CAS拒绝。
+  const runtimeBefore=structuredClone(before.runtimeInputs)
+  await f.args.updateChat(f.chatId,chat=>{chat.runtimeInputs={'43':{turn:43}};return chat})
+  const blocked=await f.read(),count=f.eventCount()
+  const target={kind:'native-only',chatId:blocked.id,sessionId:blocked.sessionId,turn:43,branchId:blocked.timeline.branchId,revision:blocked._storageRevision,endSeq:events.at(-1).seq,eventCount:events.length}
+  await assert.rejects(cleanRollback({...await f.fresh(),failureTarget:target}),/业务运行数据/)
+  assert.deepEqual(await f.read(),blocked,'拒绝后head与revision完全不变')
+  assert.equal(f.eventCount(),count);assert.equal(f.syncFrames.length,0)
+  await f.args.updateChat(f.chatId,chat=>{if(runtimeBefore===undefined)delete chat.runtimeInputs;else chat.runtimeInputs=runtimeBefore;return chat})
+  for(const [turn,keep]of [[43,f.keep42],[42,f.keep41]]){
+   const found=await f.nativeTarget()
+   assert.equal(found.cleanable,true,String(found.reason));assert.equal(found.target.turn,turn)
+   assert.deepEqual((await f.view()).failureTarget,found.target,'真实窗口view同后端签目标')
+   const result=await cleanRollback({...await f.fresh(),failureTarget:found.target})
+   assert.equal(result.rolledBack.cleanedFailureTarget.turn,turn)
+   assert.equal(f.eventCount(),keep);assert.equal(f.lastTurn(),turn-1)
+   const now=await f.read()
+   assert.deepEqual(now.messages,before.messages);assert.deepEqual(now.variables,before.variables)
+   assert.deepEqual(now.timeline,before.timeline,'无业务失败不改成功账本/基准/分支')
+   assert.equal(now.rollbackPending,undefined)
+  }
+  assert.deepEqual(f.session.snapshotEvents(),prefix,'保留前缀逐字不变，替换与失败尾物理清除')
+  assert.deepEqual(f.syncFrames.map(frame=>frame.value.hiddenTurn),[43,42])
+  assert.equal(f.agents.get(f.session.id).phase.lastTurn,41)
+  for(const handle of f.handles){assert.equal(handle.state.cursor,f.keep41);assert.equal(handle.observedLength,f.keep41);assert.equal(handle.state.primed,undefined)}
+  assert.equal(f.args.services.projections.stateOf(f.session,'turnBoundary').lastTurn,41)
+  const cold=f.store.readOpeningWindow(f.chatId,{limit:48,requirePartial:true,sessionId:f.session.id})
+  assert.deepEqual((await f.read()).messages,before.messages);assert.ok(cold,'清后SQL窗口可读')
  }finally{await f.cleanup()}
 })
 
@@ -415,4 +535,74 @@ test('native清理中途失败留pending：状态一致后按rollbackId重试完
   assert.equal(result.turn,41,'42 仍须可清并停在 41')
   assert.equal(f.lastTurn(),41)
  }finally{await f.cleanup()}
+})
+
+// 中断窗口：原生 error/aborted 已落 turn/end 且有完整基准，但延迟 discard 未跑完 ⇒ body 仍 running。
+// 窄窗 UI 可签（视图走 readOpeningWindow+SQL failureCleanup 候选），后端允许 running 候选但保留 quiesce/CAS/完整基准；
+// 活动成功（reason completed）、无 end、缺业务基准三种情况一律不签/拒清。
+// 正例与三个负例各自独立 fixture（with43:false 直接以 42 为尾）；负例用真实状态各走一条独立拒绝理由，不用假身份。
+function running42Target(chat){return {turn:42,branchId:chat.timeline.branchId,revision:chat._storageRevision,operationId:'op42',chatId:chat.id,sessionId:chat.sessionId}}
+test('失败终态先落盘而正文仍running：窗口可签且物理清理，活动成功和缺基准拒绝',async()=>{
+ const f=await fixture(readAuthorSource,{seedAfter41:true,with43:false})
+ try{
+  await f.args.updateChat(f.chatId,now=>{now.timeline.operations.op42.status='running';return now},{source:'fixture.body-interrupted'})
+  assert.equal(f.lastTurn(),42,'前置：事件尾必须是 42')
+  const interrupted=await f.read()
+  assert.equal(interrupted.timeline.operations.op42.status,'running','前置：op42 必须仍 running')
+  assert.ok(interrupted.timeline.operations.op42.businessBefore,'前置：running 候选必须带完整基准')
+  const window0=await f.openingWindow()
+  assert.ok(window0&&window0.nativeData===true,'视图必须走真 opening 窗口')
+  assert.equal(window0.failureCleanup.cleanable,true,'窄 SQL 摘要必须把 running 候选判为可清：'+String(window0.failureCleanup.reason))
+  assert.equal(window0.failureCleanup.operationId,'op42','窄摘要必须指向 op42')
+  assert.equal(Number(window0.failureCleanup.turn),42)
+  const target=(await f.view()).failureTarget
+  assert.ok(target,'running 候选必须能签目标')
+  assert.equal(target.operationId,'op42','签发的必须是窄窗 42 目标')
+  assert.equal(target.turn,42)
+  assert.equal(target.kind,undefined,'running 目标必须来自窄窗（非 native-only）')
+  assert.equal(target.eventCount,undefined,'窄窗目标不得带 native 坐标')
+  const beforeClean=await f.read()
+  const cleaned=await cleanRollback({...await f.fresh(),failureTarget:target})
+  assert.equal(cleaned.turn,41,'running 候选清理后必须停在正文 41')
+  assert.equal(f.eventsFrom(f.keep41),0,'42 的事件尾必须物理删除')
+  assert.equal(f.eventCount(),f.keep41,'事件数必须回到 41 边界')
+  assert.equal(f.lastTurn(),41,'事件尾轮必须停在 41')
+  const final=await f.read()
+  assert.equal(final.timeline.operations.op42,undefined,'42 的 operation 必须被清')
+  assert.deepEqual(final.messages,beforeClean.messages,'正文必须等于清理前（不变量）')
+  assert.equal(final.messages.length,57)
+  assert.deepEqual(final.variables,beforeClean.variables,'变量必须按基准恢复/不变')
+  assert.equal(f.agents.get(f.session.id).phase.lastTurn,41,'内存 phase.lastTurn 必须回拨到 41')
+  assert.equal([...f.handles][0].state.cursor,f.keep41,'句柄游标必须回卷到 41 边界')
+  assert.equal(f.args.services.projections.stateOf(f.session,'turnBoundary').lastTurn,41,'投影必须重算为 41')
+  assert.equal(f.syncFrames.length,1,'清理必须 publish 一次')
+  assert.equal(f.syncFrames.at(-1).value.hiddenTurn,42)
+ }finally{await f.cleanup()}
+ // 负例：原生收尾与基准必须原样构造（completed / 无 end / 缺基准），各自独立 fixture；body 目标不含 native 坐标，不走 nativeTarget
+ const negatives=[{label:'原生42 completed 活动成功',options:{seedAfter41:true,with43:false,body42Ending:'completed'},expectRefuse:/不是失败结束/},{label:'原生42 无 end 活动轮',options:{seedAfter41:true,with43:false,body42Ending:'active'},expectRefuse:/缺少唯一完整失败开始\/结束/},{label:'op42 缺业务基准',options:{seedAfter41:true,with43:false,body42Ending:'aborted',withoutBaseline42:true},expectRefuse:/回退基准|业务回退基准/}]
+ for(const entry of negatives){
+  const g=await fixture(readAuthorSource,entry.options)
+  try{
+   await g.args.updateChat(g.chatId,now=>{now.timeline.operations.op42.status='running';return now},{source:'fixture.body-interrupted-negative'})
+   const chat=await g.read()
+   assert.equal(chat.timeline.operations.op42.status,'running',entry.label+'：前置 op42 必须 running')
+   // 活动轮没有 turn/end（lastTurn 只认 turn/end，故此处按真实 event 序列取"最新出现过的轮号"=42）
+   const tailTurn=g.session.snapshotEvents().reduce((turn,event)=>event&&/^turn\//.test(String(event.type))?Math.max(turn,Number(event.data&&event.data.turn)):turn,0)
+   assert.equal(tailTurn,42,entry.label+'：前置事件尾必须是 42（body 目标不含 native 坐标，不走 nativeTarget）')
+   if(entry.options.withoutBaseline42)assert.equal(chat.timeline.operations.op42.businessBefore,undefined,entry.label+'：前置必须确实缺基准')
+   const window=await g.openingWindow()
+   assert.ok(window&&window.nativeData===true,entry.label+'：必须走真 opening 窗口')
+   if(entry.options.withoutBaseline42)assert.equal(window.failureCleanup.cleanable,false,entry.label+'：缺基准窄摘要必须不可清')
+   else assert.equal(window.failureCleanup.cleanable,true,entry.label+'：窄摘要只做候选，拒绝由视图门禁负责：'+String(window.failureCleanup.reason))
+   assert.equal((await g.view()).failureTarget,null,entry.label+'：视图必须不签目标')
+   const counts=g.eventCount(),revision=chat._storageRevision,frames=g.syncFrames.length,rows=chat.messages.length
+   await assert.rejects(cleanRollback({...await g.fresh(),failureTarget:running42Target(chat)}),entry.expectRefuse,entry.label+'：后端必须拒')
+   const after=await g.read()
+   assert.equal(g.eventCount(),counts,entry.label+'：拒绝路径零事件写')
+   assert.equal(after._storageRevision,revision,entry.label+'：拒绝路径不得推进版本')
+   assert.equal(after.timeline.operations.op42.status,'running',entry.label+'：拒绝路径不得改 body 状态')
+   assert.equal(after.messages.length,rows,entry.label+'：拒绝路径不得改正文')
+   assert.equal(g.syncFrames.length,frames,entry.label+'：拒绝路径不得 publish')
+  }finally{await g.cleanup()}
+ }
 })

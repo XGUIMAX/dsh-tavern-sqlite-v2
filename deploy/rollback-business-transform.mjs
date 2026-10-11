@@ -5,28 +5,72 @@ function once(source, old, next) {
   return source.replace(old,next)
 }
 export function applyRollbackBusinessTimelineTransform(source) {
+  if (source.includes('// [dsh-tavern-single-business-baseline:v1]')) return singleBusinessBaseline(source)
   const importLine = "import { captureRollbackBusinessState, restoreRollbackBusinessState } from './storage-rollback-business.js'"
   const historyCall='restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone, options.readRollbackWorldbook)'
   // 新接线调用包含旧调用的前缀但不是同一字符串，标记核验须识别两代完整消费者。
   if(source.includes('// [dsh-tavern-worldbook-history-timeline:v1]') && !source.includes(historyCall))throw Error('世界书历史时间线接线不完整')
   if (source.includes(MARKER)) {
     for (const key of [importLine,'businessBefore: operation.businessBefore',source.includes('captureRollbackBusinessState(chat, clone, options.readRollbackWorldbookRef?.(chat))')?'businessBefore: intent.businessBefore || captureRollbackBusinessState(chat, clone, options.readRollbackWorldbookRef?.(chat))':'businessBefore: intent.businessBefore || captureRollbackBusinessState(chat, clone)',source.includes(historyCall)?historyCall:'restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)']) if (!source.includes(key)) throw new Error('业务回退标记存在但消费者不完整')
-    return worldbookHistoryReader(preserveMacroConfiguration(source))
+    return singleBusinessBaseline(worldbookHistoryReader(preserveMacroConfiguration(source)))
   }
   let next = importLine+'\n'+MARKER+'\n'+source
   next = once(next,'rowBefore: operation.rowBefore,','rowBefore: operation.rowBefore, businessBefore: operation.businessBefore,')
   next = once(next,'rowBefore: rollbackHead(chat), beforeParticipants:', 'rowBefore: rollbackHead(chat), businessBefore: intent.businessBefore || captureRollbackBusinessState(chat, clone), beforeParticipants:')
   next = once(next,'    restore(chat, restoredState)', '    if (!checkpoint.businessBefore) throw new Error(\'本轮缺少完整业务回退基准，未修改数据库；不能用当前状态冒充上一轮\')\n    restore(chat, restoredState)\n    restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)')
-  return worldbookHistoryReader(preserveMacroConfiguration(next))
+  return singleBusinessBaseline(worldbookHistoryReader(preserveMacroConfiguration(next)))
+}
+// 新回合只写完整业务基准；row-v1只保留读取，不再复制第二份头快照。
+function singleBusinessBaseline(source) {
+  const marker = '// [dsh-tavern-single-business-baseline:v1]'
+  const oldRestore = `    if (!checkpoint.businessBefore) throw new Error('本轮缺少完整业务回退基准，未修改数据库；不能用当前状态冒充上一轮')
+    // [dsh-tavern-rollback-macro-config:v1]
+    const currentMacroState = chat.macroState
+    restore(chat, restoredState)
+    chat.macroState = currentMacroState
+    restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone, options.readRollbackWorldbook)`
+  const newRestore = `    // [dsh-tavern-rollback-macro-config:v1]
+    // row-v1严格转换仍走同一解析器，用户宏配置不经旧整头restore。
+    const businessBaseline = resolveRollbackBusinessState(chat, Number(checkpoint.turn))
+    chat.messages = clone(restoredState.messages)
+    restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook)`
+  const importOld = "import { captureRollbackBusinessState, restoreRollbackBusinessState } from './storage-rollback-business.js'"
+  const importNew = "import { captureRollbackBusinessState, restoreRollbackBusinessState, resolveRollbackBusinessState } from './storage-rollback-business.js'"
+  if (source.includes(marker)) {
+    for (const needle of [importNew, 'businessBefore: operation.businessBefore', newRestore, 'businessBefore: intent.businessBefore || captureRollbackBusinessState(chat, clone, options.readRollbackWorldbookRef?.(chat))', 'captureBusiness: chat => captureRollbackBusinessState(chat, structuredClone, options.readRollbackWorldbookRef?.(chat))']) {
+      if (!source.includes(needle)) throw Error('单一业务基准标记不完整')
+    }
+    if (source.includes('rowBefore: rollbackHead(chat)') || source.includes('rowBefore: operation.rowBefore')) throw Error('单一业务基准残留双写')
+    return source
+  }
+  let next = once(source, importOld, importNew)
+  next = once(next, 'rowBefore: operation.rowBefore, businessBefore: operation.businessBefore,', 'businessBefore: operation.businessBefore,')
+  next = once(next, 'rowBefore: rollbackHead(chat), businessBefore:', 'businessBefore:')
+  next = once(next, '      if (checkpoint.rowBefore !== undefined) {', `      if (checkpoint.businessBefore !== undefined) {
+        if (!Number.isSafeInteger(checkpoint.businessBefore.messageCount) || checkpoint.businessBefore.messageCount !== prefix.length) throw Error('完整回退基准正文前缀不一致，拒绝猜删')
+        restoredState = { messages: prefix, participants: checkpoint.participants }
+      } else if (checkpoint.rowBefore !== undefined) {`)
+  next = once(next, oldRestore, newRestore)
+  const unusedHead = `  // 仅逐轮业务头字段；正文由现有行前缀复用，楼变量仍由既有变量快照承载。
+  function rollbackHead(chat) {
+    const state = snapshot({ ...chat, messages: [] })
+    delete state.messages
+    delete state.participants
+    return state
+  }
+
+`
+  next = once(next, unusedHead, '')
+  return marker + '\n' + next
 }
 // 作者restore先整替macroState；业务恢复随后执行，必须在此处先保留当前用户子字段。
 function preserveMacroConfiguration(source){
   if(source.includes('// [dsh-tavern-rollback-macro-config:v1]'))return source
   return once(source,'    restore(chat, restoredState)\n    restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)',`    // [dsh-tavern-rollback-macro-config:v1]
-     const currentMacroState = chat.macroState
-     restore(chat, restoredState)
-     chat.macroState = currentMacroState
-     restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)`)
+    const currentMacroState = chat.macroState
+    restore(chat, restoredState)
+    chat.macroState = currentMacroState
+    restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone)`)
 }
 function worldbookHistoryReader(source){
  const marker='// [dsh-tavern-worldbook-history-timeline:v1]'

@@ -10,13 +10,15 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSessionWindowProjector, REQUIRED_FUNCTIONS, REQUIRED_VALUES } from '../lib/session-window-projector.js'
 import { applyNativeDataTransform, ANCHORS, REQUIRED_BLOCKS, isNativeDataApplied } from '../deploy/native-data-transform.mjs'
+import { viewAssemblerSource } from '../deploy/view-assembler-source.mjs'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PKG = path.resolve(HERE, '..')
-const AUTHOR_ROOT = path.resolve(PKG, '..', '..', 'tmp', 'release-034-20261008', 'author-fixture', 'src',
-  'dsh-tavern-68215e47516637e00c75d2b4bba3192679559425', 'tavern-plugin', 'lib')
+const AUTHOR_ROOT = path.resolve(PKG, '..', '..', 'tmp', 'upstream-a2008-review-20261010', 'author-tree',
+  'dsh-tavern-a2008bf932031616fd80ec265cbdba5d0b559312', 'tavern-plugin', 'lib')
 const AUTHOR_INDEX = path.join(AUTHOR_ROOT, 'index.js')
+const {assembleTavernView} = await import('data:text/javascript;base64,' + Buffer.from(viewAssemblerSource(fs.readFileSync(AUTHOR_INDEX, 'utf8')), 'utf8').toString('base64'))
 
 function sliceClosureFunction(source, header, endMarker = '\n  }\n') {
   const start = source.indexOf(header)
@@ -67,6 +69,7 @@ export function buildDeps(fixture) {
   const track = (name, fn) => function tracked(...args) { calls.push(name); return fn.apply(this, args) }
   const helperContext = { messages: [{ message_id: 0, role: 'assistant' }, { message_id: 2, role: 'assistant' }], turnMessageIds: { 1: 0, 2: 2 } }
   const deps = {
+    assembleTavernView,
     str: value => (value === undefined || value === null ? '' : String(value)),
     readTavernSettings: track('readTavernSettings', async () => ({ trustedCardMode: false, frameSizing: 'fill' })),
     readScript: track('readScript', async () => undefined),
@@ -217,6 +220,16 @@ test('S2-6 transform 唯一锚点/幂等自校验/半应用拒绝/生成块齐�
   assert.ok(applied.includes('连续过期'), '竞态重投影用尽必须响亮报错')
   assert.ok(applied.includes('拒绝返回旧窗口'), '耗尽报错必须拒绝返回旧窗口而非 fallback')
   assert.throws(() => applyNativeDataTransform(applied + '\n// [dsh-tavern-native-data-transform:v1]', options), /半应用|标记数异常/)
+})
+
+test('D02 已施native-data原位升级到作者组装器且半接线拒绝', () => {
+  const raw = fs.readFileSync(AUTHOR_INDEX, 'utf8')
+  const applied = applyNativeDataTransform(raw, {projectorImportPath:'./domain/storage-native-data.js'})
+  const legacy = applied.replace('createActivitySummaryBridge, assembleTavernView } from', 'createActivitySummaryBridge } from')
+    .replace('    get assembleTavernView() { return assembleTavernView },\n', '')
+  assert.notEqual(legacy, applied)
+  assert.equal(applyNativeDataTransform(legacy), applied)
+  assert.throws(() => applyNativeDataTransform(applied.replace('    get assembleTavernView() { return assembleTavernView },\n', '')), /不完整/)
 })
 
 test('S2-7 真实 module 导出与 bridge wrap/set/null 语义（runtime 可得，非 includes）', async () => {

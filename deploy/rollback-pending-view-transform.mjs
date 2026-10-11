@@ -1,5 +1,23 @@
 // 半提交时按钮必须允许『完成同一回退』，不能按已删正文去选择更早一轮。
 const MARKER='// [dsh-tavern-rollback-pending-view:v1]'
+function ordinaryTargetView(source) {
+ const marker='// [dsh-tavern-ordinary-rollback-target:v1]'
+ if(source.includes(marker))return source
+ const anchor='  function rollbackViewFields(chat, evidence = evidenceOf(chat.sessionId), changes) {'
+ const next=`  ${marker}
+  function rollbackViewFields(chat, evidence, changes) {
+    const value = rollbackViewFieldsBase(chat, evidence, changes)
+    const revision = Number.isSafeInteger(chat.windowRevision) ? chat.windowRevision : chat._storageRevision
+    const turn = Number(value.rollbackTargetTurn)
+    const rollbackTarget = value.canRollback && !value.canClearIncompleteReply
+      ? (chat.rollbackPending?.ordinaryTarget || (Number.isSafeInteger(turn) && turn > 0 && Number.isSafeInteger(revision)
+        ? { kind: 'rollback', turn, chatId: chat.id, sessionId: chat.sessionId, branchId: chat.timeline?.branchId, revision } : null)) : null
+    return { ...value, rollbackTarget }
+  }
+  function rollbackViewFieldsBase(chat, evidence = evidenceOf(chat.sessionId), changes) {`
+ if(source.split(anchor).length!==2)throw Error('普通回退目标视图锚点不唯一')
+ return source.replace(anchor,next)
+}
 export function applyRollbackPendingViewTransform(source){
  const anchor='  function rollbackViewFields(chat, evidence = evidenceOf(chat.sessionId), changes) {'
  const blockOriginal=`${anchor}
@@ -24,11 +42,11 @@ export function applyRollbackPendingViewTransform(source){
    const hasLatestVariant = source.includes('canRollback: true, canClearIncompleteReply: !!chat.rollbackPending.failureTarget,')
    const hasPendingCheck = source.includes('if (chat.rollbackPending) return {')
    if(!hasPendingCheck || (!hasOriginal && !hasLatestVariant)) throw Error('回退重试视图标记不完整')
-   return source
+   return ordinaryTargetView(source)
  }
  if(source.split(anchor).length!==2)throw Error('回退重试视图锚点不唯一')
  let next=source.replace(anchor,blockOriginal)
  const fields="'backgroundConfigVersion', 'conversationFeaturesVersion', 'disabledWritingSkills', 'contextCompaction', 'updatedAt', 'timeline', 'candidateAgent',"
  if(next.split(fields).length!==2)throw Error('回退重试头字段锚点不唯一')
- return next.replace(fields,fields+" 'rollbackPending',")
+ return ordinaryTargetView(next.replace(fields,fields+" 'rollbackPending',"))
 }

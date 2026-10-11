@@ -5,6 +5,44 @@ const NEXT=`${MARKER}
 					if (typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退已落盘，但宿主缺少同连接同步消费者；请重开页面");
 					await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync);
 					// RPC旧view不安装；只有push之后的新读拥有发布权。`
+// R2 普通回退重试闭环（2026-10-11）：
+//   · 主 catch 失败后会刷新协调/view，视图可能已回到更早轮（甚至 canRollback=false）；
+//     本次失败的**普通目标**必须留在组件 state 里，用户才能对同一目标原凭据重试。
+//   · 若已有 retry 目标则沿用（不覆盖成刷新后的更早轮）；成功（同连接 push 之后）清空。
+//   · 只影响普通回退：失败清理（clearIncomplete）走 failureTarget + 数字轮语义，不经该 state。
+const RETRY_MARKER='// [dsh-tavern-rollback-retry-target:v1]'
+const RETRY_SCOPE_MARKER='// [dsh-tavern-rollback-retry-session:v1]'
+const RETRY_STATE=`${RETRY_SCOPE_MARKER}
+const [rollbackRetryState, setRollbackRetryTarget] = React.useState(null);
+const rollbackRetryOwner = React.useRef(props.sessionId);
+rollbackRetryOwner.current = props.sessionId;
+React.useEffect(function () { setRollbackRetryTarget(function (current) { return current && current.sessionId !== props.sessionId ? null : current; }); }, [props.sessionId]);
+const rollbackRetryTarget = rollbackRetryState && rollbackRetryState.sessionId === props.sessionId ? rollbackRetryState : null;`
+const ROLLING_STATE_OLD='const [rolling, setRolling] = React.useState(false);'
+const ROLLING_STATE_NEW=`const [rollbackRunningSession, setRollbackRunningSession] = React.useState(null);
+const rolling = rollbackRunningSession === props.sessionId;
+function setRolling(value) { setRollbackRunningSession(function (current) { return value ? props.sessionId : current === props.sessionId ? null : current; }); }`
+const CLEAR_MODE_OLD='const clearIncomplete = rollbackViewState.view && rollbackViewState.view.canClearIncompleteReply === true;'
+const CLEAR_MODE_NEW='const clearIncomplete = !rollbackRetryTarget && rollbackViewState.view && rollbackViewState.view.canClearIncompleteReply === true;'
+const CAN_OLD='const canRollback = rollbackViewState.view && rollbackViewState.view.canRollback === true;'
+const CAN_NEW='const canRollback = !!rollbackRetryTarget || (rollbackViewState.view && rollbackViewState.view.canRollback === true);'
+const RETRY_RPC_OLD='{ expectedTurn: ordinaryTurn }'
+const RETRY_RPC_NEW='{ expectedTurn: rollbackRetryTarget || ordinaryTurn }'
+const RETRY_CATCH_ANCHOR='                    liveTavernView.rebase(props.sessionId);\n                    tavernCoordination.invalidate(props.sessionId);\n                    tavernErrorHub.report("回退本轮", err);'
+const RETRY_CATCH_NEXT=`                    // 只保留本session本次普通请求凭据；旧会话迟到的catch不得覆盖新会话。
+                    if (!clearIncomplete && rollbackRetryOwner.current === props.sessionId) setRollbackRetryTarget(function (current) {
+                        const target = rollbackRetryTarget || (rollbackViewState.view && rollbackViewState.view.rollbackTarget) || null;
+                        return current && current.sessionId === props.sessionId ? current : target && target.sessionId === props.sessionId ? target : null;
+                    });
+                    liveTavernView.rebase(props.sessionId);
+                    tavernCoordination.invalidate(props.sessionId);
+                    tavernErrorHub.report("回退本轮", err);`
+const RETRY_CLEAR_ANCHOR='await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync);'
+const RETRY_CLEAR_NEXT=`await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync);
+                    // 同连接完成已确认；只清理请求所属session的凭据，不能清掉新会话重试。
+                    setRollbackRetryTarget(function (current) { return current && current.sessionId === props.sessionId ? null : current; });`
+const RETRY_LABEL_OLD='clearIncomplete ? "清除未完成回复" : targetLabel);'
+const RETRY_LABEL_NEW='clearIncomplete ? "清除未完成回复" : rollbackRetryTarget ? "重试完成回退" : targetLabel);'
 const EVENT=`const slots = ctx.slots;
             ctx.effect(function () {
                 return ctx.on("tavern-storage/rollback-synced", function (receipt) {
@@ -36,6 +74,40 @@ const EVENT=`const slots = ctx.slots;
                 }
             });`
 function once(s,a,b){if(s.split(a).length!==2)throw Error('回退同步作者锚点缺失/不唯一：'+a.slice(0,90));return s.replace(a,b)}
+function scopedRetryMode(source){
+ const start=source.indexOf('function TavernRollbackAction(props)'),end=source.indexOf('async function rollback()',start)
+ if(start<0 || end<start)throw Error('普通回退模式组件边界缺失')
+ return source.slice(0,start)+once(source.slice(start,end),CLEAR_MODE_OLD,CLEAR_MODE_NEW)+source.slice(end)
+}
+// R2 重试闭环接线（幂等）：state + canRollback + 普通 RPC 选择 + catch 记录 + 成功清空 + 标签。
+// 已带 RETRY_MARKER 的产物只核结构完整，不重复施缝（与 error-purge 的标记产物兼容）。
+export function applyRollbackRetryState(source){
+ if(source.includes(RETRY_MARKER)){
+  for(const needle of [RETRY_STATE,ROLLING_STATE_NEW,CAN_NEW,RETRY_LABEL_NEW,CLEAR_MODE_NEW,RETRY_CATCH_NEXT,'return current && current.sessionId === props.sessionId ? null : current;'])
+   if(!source.includes(needle))throw Error('回退重试闭环标记不完整：'+needle.slice(0,60))
+  if(!source.includes(RETRY_RPC_NEW) && source.includes(RETRY_RPC_OLD)) throw Error('回退重试闭环标记不完整：普通RPC未接重试目标')
+  return source
+ }
+ const start=source.indexOf('async function rollback()',source.indexOf('function TavernRollbackAction(props)'))
+ const end=source.indexOf('if (!canRollback) {',start)
+ if(start<0 || end<start)throw Error('回退重试闭环callback边界漂移')
+ // hook 只声明在 TavernRollbackAction 组件体内，且必须早于 canRollback 的读取（TDZ）。
+ const compStart=source.indexOf('function TavernRollbackAction(props)')
+ const viewDecl='const rollbackViewState = useLiveTavernView(props.sessionId, "rollback:'
+ const anchorAt=source.indexOf(viewDecl,compStart)
+ if(compStart<0 || anchorAt<0 || source.split(viewDecl).length!==2 || anchorAt>start)throw Error('回退重试闭环组件锚点缺失或漂移')
+ const lineStart=source.lastIndexOf('\n',anchorAt)+1
+ const indent=source.slice(lineStart,anchorAt)
+ let out=source.slice(0,lineStart)+RETRY_MARKER+'\n'+indent+RETRY_STATE+'\n'+source.slice(lineStart)
+ out=once(out,ROLLING_STATE_OLD,ROLLING_STATE_NEW)
+ out=once(out,CAN_OLD,CAN_NEW)
+ out=scopedRetryMode(out)
+ // 普通 RPC 行：新施缝时 error-purge 后施（此刻还没有 ordinaryTurn），此处只对已施过 purge 的产物兜底。
+ if(out.includes(RETRY_RPC_OLD))out=out.replace(RETRY_RPC_OLD,RETRY_RPC_NEW)
+ out=once(out,RETRY_CATCH_ANCHOR,RETRY_CATCH_NEXT)
+ out=once(out,RETRY_LABEL_OLD,RETRY_LABEL_NEW)
+ return once(out,RETRY_CLEAR_ANCHOR,RETRY_CLEAR_NEXT)
+}
 function inlineModule(source,name,transform){
  const start=source.indexOf('function '+name+'('),end=source.indexOf('\n\t\tfunction ',start+10)
  if(start<0 || end<start)throw Error('作者内联状态模块边界漂移：'+name)
@@ -44,10 +116,26 @@ function inlineModule(source,name,transform){
  const raw=source.slice(begin,end).replace(/^\t\t/gm,'')
  return source.slice(0,begin)+transform(raw).replace(/\n/g,'\n\t\t')+source.slice(end)
 }
+function recoverOrdinaryAction(source) {
+ const marker='// [dsh-tavern-rollback-error-refresh:v1]'
+ if(source.includes(marker))return applyRollbackRetryState(source)
+ const start=source.indexOf('async function rollback()',source.indexOf('function TavernRollbackAction(props)'))
+ const end=source.indexOf('if (!canRollback) {',start)
+ if(start<0 || end<start)throw Error('回退错误刷新callback边界漂移')
+ const block=source.slice(start,end)
+ const anchor='tavernErrorHub.report("回退本轮", err);'
+ const next=`${marker}
+                    liveTavernView.rebase(props.sessionId);
+                    tavernCoordination.invalidate(props.sessionId);
+                    ${anchor}`
+ return applyRollbackRetryState(source.slice(0,start)+once(block,anchor,next)+source.slice(end))
+}
 export function applyAuthorRollbackActionTransform(source){
  if(source.includes(MARKER)){
-  if(source.split(MARKER).length!==2 || !source.includes(NEXT) || source.includes('// [dsh-tavern-core-client-resync:v1]'))throw Error('同连接回退按钮消费者不完整')
-  return source
+  if(source.split(MARKER).length!==2 || !source.includes('await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync);')
+    || !source.includes('typeof props.sessions?.waitForTavernRollbackSync !== "function"')
+    || source.includes('// [dsh-tavern-core-client-resync:v1]'))throw Error('同连接回退按钮消费者不完整')
+  return recoverOrdinaryAction(source)
  }
  const start=source.indexOf('async function rollback()',source.indexOf('function TavernRollbackAction(props)')),end=source.indexOf('if (!canRollback) {',start)
  if(start<0 || end<start)throw Error('回退同步callback边界漂移')
@@ -55,7 +143,7 @@ export function applyAuthorRollbackActionTransform(source){
  callback=once(callback,'historyProjection.rolledBack(props.sessionId, result && result.view);',NEXT)
  callback=once(callback,'notifyTavernDataChanged(["sessions"], "play-controls");','// 同连接push只定向通知本档。')
  callback=once(callback,'setRolling(false); liveTavernView.invalidate(props.sessionId); tavernCoordination.invalidate(props.sessionId);','setRolling(false);')
- return source.slice(0,start)+callback+source.slice(end)
+ return recoverOrdinaryAction(source.slice(0,start)+callback+source.slice(end))
 }
 export function applyAuthorRollbackRuntimeTransform(source){
  const marker='// [dsh-tavern-rollback-sync-runtime:v1]'

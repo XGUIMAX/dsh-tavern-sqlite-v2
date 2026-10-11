@@ -26,6 +26,9 @@ import { readFileSync, existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServerExecution, classifyCardScript } from '../lib/server-execution.js'
 import { HELPER_GENERATION_EVENTS } from '../lib/helper-generation-api.js'
+import {helperReadonlySource} from '../deploy/helper-readonly-source.mjs'
+const currentBuilt = readFileSync(new URL('../../../tmp/upstream-a2008-review-20261010/author-tree/dsh-tavern-a2008bf932031616fd80ec265cbdba5d0b559312/tavern-plugin/lib/client.js',import.meta.url),'utf8')
+const authorReadonly = await import('data:text/javascript;base64,'+Buffer.from(helperReadonlySource(currentBuilt,currentBuilt),'utf8').toString('base64'))
 import { createHelperGenerationTasks } from './fixtures/upstream-25-helper-generation/helper-generation-tasks.js'
 
 const require = createRequire(import.meta.url)
@@ -56,6 +59,10 @@ function extractFunction(source, name) {
 
 const scriptsSource = authorRead('lib/domain/tavern-helper-scripts.js')
 const authorProject = new Function(scriptsSource.replace(/^export /gm, '') + '\nreturn {projectTavernHelperScripts, isHostOwnedMvu}')()
+// D04：真作者消息投影（helper-context 里的 projectTavernHelperMessage），供 DI 选路叶使用。
+const helperContextSource = authorRead('lib/domain/tavern-helper-context.js')
+const authorProjectHelperMessage = new Function(['str', 'clone', 'selectedSwipe', 'normalizeMessageId', 'tavernHelperRole', 'projectTavernHelperMessage']
+  .map(name => extractFunction(helperContextSource, name)).join('\n') + '\nreturn projectTavernHelperMessage')()
 const engineSource = authorRead('lib/domain/tavern-regex-engine.js')
 const authorRegexEngine = new Function(extractFunction(engineSource, 'createTavernRegexEngine') + '\nreturn createTavernRegexEngine')()
 const installerSource = authorRead('lib/domain/tavern-helper-regex-api.js')
@@ -407,6 +414,9 @@ test('④ 只读族真接线：macro 纯计算、作者 regex installer/engine �
       buttons: [{ name: '重来', visible: true }, { name: '隐藏', visible: false }]
     }],
     extra: {
+      // 标准装配优先作者本次真实macro/slash，同实际执行器消费DI。
+      installMacroApi: authorReadonly.installTavernHelperMacroApi,
+      createSlashReader: authorReadonly.createSlashReader,
       // 只读层需要作者真 installer/engine（缺失即响亮失败，本包不伪空正则）
       installRegexApi: authorRegexInstaller,
       createRegexEngine: () => authorRegexEngine()
@@ -501,5 +511,42 @@ test('⑥ TavernHelper.tavern_events/eventTavern/eventTypes 指同一张真事�
     for (const marker of ['alias', 'tavern', 'types', 'bare']) {
       assert.equal(probe.seen.includes(marker), true, '真派发命中注册来源：' + marker)
     }
+  } finally { fixture.execution.disposeAll() }
+})
+// ───────────────── D04 DI 选路：作者消息投影注入后，仍保 active variables 覆写 ─────────────────
+const DI_PROJECT_SCRIPT = [
+'eventOn(TavernHelper.tavern_events.MESSAGE_SENT, function () {',
+'  var rows = TavernHelper.getAllChatMessages()',
+'  TavernHelper.replaceVariables({ di_probe: JSON.stringify({',
+'    hasRow: rows.length === 1,',
+'    swipe: rows[0].swipes_data ? rows[0].swipes_data[rows[0].swipe_id] : null',
+'  }) }, { type: "chat" })',
+'})'
+].join('\n')
+
+test('D04 DI 选路：projectHelperMessage 注入时收到 raw identity，active variables 覆写仍生效', async () => {
+  const seen = []
+  const fixture = consumer({
+    extensionScripts: [scriptEntry(DI_PROJECT_SCRIPT)],
+    extra: {
+      // consumer 只透传 ...extra（:142）；DI 必须写在这一层
+      projectHelperMessage: (row, id) => {
+        seen.push({ id, rawSwipeId: row.swipeId, rawPluginInternal: row.tavernPluginData?.internal })
+        return authorProjectHelperMessage(row, id)
+      }
+    }
+  })
+  // raw 行内部字段（绝不应出现在给卡脚本的公开行里）——用于证明注入函数拿到的是 raw 行
+  fixture.chat.messages[0].tavernPluginData = { internal: 'secret' }
+  try {
+    const result = await fixture.execution.dispatchLifecycleEvent(sentInput(fixture))
+    assert.equal(Boolean(result && result.handled), true, '脚本必须被真实派发处理（先证链路，再证投影）')
+    const probe = JSON.parse(fixture.chat.variables.di_probe)
+    assert.equal(probe.hasRow, true, 'getAllChatMessages 必须返回该楼（脚本真读到行）')
+    assert.equal(seen.length > 0, true, '注入的 projectHelperMessage 必须被真 server 投影链调用')
+    assert.equal(seen[0].rawSwipeId, 0, '注入函数收到的是 raw 行身份（swipeId 原值）')
+    assert.equal(seen[0].rawPluginInternal, 'secret', '注入函数收到 raw 行内部字段（未经公开投影清洗）')
+    assert.deepEqual(probe.swipe, { stat_data: { hp: 1 }, schema: { type: 'object' } },
+      '作者投影返回后 active variables 覆写仍生效（swipes_data[active] 为该楼真树）')
   } finally { fixture.execution.disposeAll() }
 })

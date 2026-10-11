@@ -9,10 +9,10 @@
 // 令 43 清完后的 42 立刻重算（不再只依赖下一次 render）；不做 before-target 删除/软隐藏/自动双清。
 // 目标身份 key 增 kind/endSeq/eventCount：43→42 切换必须重建控件并 refresh。
 // kind 只认 native-only 或 undefined/body（未知值一律拒）；branchId/revision 两侧 exact；body operationId 不做 string 转换比较。
-// 菜单路径复用作者同步消费者（applyAuthorRollbackActionTransform）已插入的 wait：alreadyClean 不等待，clearIncomplete 在 wait 后定向 rebase+refresh（不 double wait）。
+// 菜单clear分支与错误行共同委托tavernStorageUi.cleanFailure；普通回退仍走作者同连接等待，旧内联块只用于严格升级识别。
 const MARKER_TURN = '// [dsh-tavern-error-purge-turn:v1]'
 const MARKER_PLAY = '// [dsh-tavern-error-purge-play:v1]'
-// 目标身份比较的唯一实现（同一文本按两处缩进渲染：面板 24 空格、菜单走 \n\t\t\t\t\t 约定；自包含不引用文件外符号）。
+// 仅用于严格识别旧 marked 菜单的升级输入；新产物不再内联这份旧比较器。
 const TARGET_COMPARE_LINES = [
   'var targetCompare = function (ft, cft) {',
   '    if (!ft || !cft || typeof ft !== "object" || typeof cft !== "object") return "目标缺失";',
@@ -49,6 +49,21 @@ const MENU_CLEAR_WAIT_BLOCK = [
 ].map(line => '\n\t\t\t\t\t' + line).join('')
 // built/inline 布局的 clear-only 同步消费者守卫（RPC 前即抛）；split 布局作者 guard 已在位 ⇒ 不重复插。
 const MENU_CLEAR_GUARD = '\n\t\t\t\t\tif (clearIncomplete && typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行清理");'
+// 普通回退的发起凭据（R2）：完成记录/reconcile 未就绪时退回作者原数字语义，非法值大声拒绝。
+// 失败清理（clearIncomplete）**不使用**该目标，仍按原 failureTarget + 数字 turn 语义（PURGE_CLEAR_ONLY）。
+// 只做目标选择与非法值拒绝，**不新增**live/协调失效配对（既有协调接线计数保持不变）。
+const MENU_ORDINARY_TURN = [
+  'var ordinaryRetry = typeof rollbackRetryTarget === "undefined" ? null : rollbackRetryTarget;',
+  'var ordinaryTarget = ordinaryRetry || (rollbackViewState.view && rollbackViewState.view.rollbackTarget);',
+  '// 对象凭据（kind rollback + turn/revision/branchId/chatId/sessionId 齐备）与纯数字目标都接受；',
+  '// 重试时视图可能已被主 catch 刷新成更早轮甚至 canRollback=false，凭据仍在就必须能用同一目标重试。',
+  'var ordinaryObject = !!(ordinaryTarget && typeof ordinaryTarget === "object" && ordinaryTarget.kind === "rollback" && Number.isSafeInteger(ordinaryTarget.turn) && ordinaryTarget.turn > 0 && Number.isSafeInteger(ordinaryTarget.revision) && ordinaryTarget.revision >= 0 && typeof ordinaryTarget.branchId === "string" && ordinaryTarget.branchId !== "" && typeof ordinaryTarget.chatId === "string" && ordinaryTarget.chatId !== "" && ordinaryTarget.sessionId === props.sessionId && (!props.chatId || ordinaryTarget.chatId === props.chatId));',
+  'var ordinaryNumber = Number.isSafeInteger(ordinaryTarget) && ordinaryTarget > 0 ? ordinaryTarget : (ordinaryTarget == null && Number.isSafeInteger(targetTurn) && targetTurn > 0 ? targetTurn : NaN);',
+  'var ordinaryTurn = ordinaryObject ? ordinaryTarget : ordinaryNumber;',
+  'if (clearIncomplete && targetTurn <= 0) throw new Error("清理缺少目标轮号，拒绝按普通回退发起");',
+  'if (!clearIncomplete && !(ordinaryObject || (Number.isSafeInteger(ordinaryTurn) && ordinaryTurn > 0))) throw new Error("普通回退缺少有效目标，请刷新后重试");',
+].map(line => '\n\t\t\t\t\t' + line).join('')
+const MENU_ORDINARY_ANCHOR = 'var ordinaryObject ='
 // 清理场景回执缺失必须响亮失败（不许 skip receipt 后继续 refresh）。
 const MENU_RECEIPT_REQUIRED = '\n\t\t\t\t\tif (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.cleanedFailureTarget)) throw new Error(\'清理未确认目标失败轮，不更新本地状态\');'
 // built/inline 布局的旧软视图行：清理场景不得安装旧 view，常规回退保持原 pipeline。
@@ -137,6 +152,61 @@ const PLAY_ONTOGGLE_NEXT = `${MARKER_PLAY}
 // 菜单清未完成：与 sync guard 已施加形态兼容——仅替换 exact RPC 行，不动 guard/其余回调。
 // client-seams 顺序：applyAuthorRollbackActionTransform → applyRollbackSyncActionGuardTransform → purge（本变换在 guard 之后）。
 const PLAY_MENU_RPC_OLD = `const result = await rpc("rollbackTurn", { expectedTurn: clearIncomplete ? null : targetTurn }, props.sessionId);`
+// R2：菜单里的普通回退行（clear-only 行保持数字 targetTurn + failureTarget，不动）。
+// 施缝后按真实缩进落地；已 marked 的旧产物（缓存旧字串）同样按旧字串严格原位升级。
+const MENU_ORDINARY_RPC_OLD = ': await rpc("rollbackTurn", { expectedTurn: targetTurn }, props.sessionId);'
+const MENU_ORDINARY_RPC_NEW = ': await rpc("rollbackTurn", { expectedTurn: ordinaryTurn }, props.sessionId);'
+const RETRY_RPC_NEW = '{ expectedTurn: rollbackRetryTarget || ordinaryTurn }'
+// 严格原位升级：只在「RPC 行唯一 + 旧普通行唯一 + 尚无普通目标行」时插目标行并替换普通行，其余一律 fail-closed。
+// TavernRollbackAction.rollback 的 region 与「已渲染」clear-only 行锚点：
+// finished 产物里模板占位 /*DSH_PURGE_*&#47; 已被替换，绝不能用含占位的 PLAY_MENU_RPC_NEXT 去 indexOf。
+const RENDERED_CLEAR_LINE='const result = clearIncomplete'
+function rollbackRegion(out){
+ const comp=out.lastIndexOf('function TavernRollbackAction(props) {')
+ if(comp<0) throw new Error('干净清理锚点缺失/不唯一：找不到 TavernRollbackAction')
+ const end=out.indexOf('if (!canRollback) {',comp)
+ if(end<comp) throw new Error('干净清理锚点缺失/不唯一：找不到 rollback callback 边界')
+ return {comp,end}
+}
+function renderedClearAt(out){
+ const {comp,end}=rollbackRegion(out)
+ const hits=[]
+ let at=out.indexOf(RENDERED_CLEAR_LINE,comp)
+ while(at>=0 && at<end){ hits.push(at); at=out.indexOf(RENDERED_CLEAR_LINE,at+1) }
+ if(hits.length!==1) throw new Error('干净清理锚点缺失/不唯一：callback 内 clear 行=' + hits.length)
+ return hits[0]
+}
+function upgradeOrdinaryMenuRpc(out, label) {
+  if (out.includes(MENU_ORDINARY_ANCHOR)) {
+    // 已升级产物：仍须核 RPC 形态在位（缺 RPC 的畸形产物不得被原样 return 当成功）。
+    const retryHits = out.split(RETRY_RPC_NEW).length - 1
+    const plainHits = out.split(MENU_ORDINARY_RPC_NEW).length - 1
+    if (retryHits === 1 && plainHits === 0) return out
+    if (retryHits === 0 && plainHits === 1 && !out.includes('const [rollbackRetryState,')) return out
+    // 半缝：普通行已在、RPC 还是纯对象形态 ⇒ 补一次 retry 前缀（仅当重试 state 在位）。
+    if (retryHits === 0 && plainHits === 1 && out.includes('const [rollbackRetryState,')) return out.replace('{ expectedTurn: ordinaryTurn }', RETRY_RPC_NEW)
+    throw new Error('干净清理锚点缺失/不唯一：' + label + '-menu-ordinary-upgrade(已标记但RPC形态不符 retry=' + retryHits + ',plain=' + plainHits + ')')
+  }
+  const oldHits = out.split(MENU_ORDINARY_RPC_OLD).length - 1
+  if (oldHits !== 1) throw new Error('干净清理锚点缺失/不唯一：' + label + '-menu-ordinary-upgrade(old=' + oldHits + ')')
+  const rpcAt = renderedClearAt(out)
+  const {comp}=rollbackRegion(out)
+  const markerAt = out.lastIndexOf(MARKER_PLAY, rpcAt)
+  if (markerAt < comp) throw new Error('干净清理锚点缺失/不唯一：' + label + '-menu-ordinary-upgrade(缺 callback PLAY marker 行)')
+  const lineStartOfMarker = out.lastIndexOf('\n', markerAt) + 1
+  const indentOfMarker = out.slice(lineStartOfMarker, markerAt)
+  const ordinaryLines = MENU_ORDINARY_TURN.replace(/\n\t\t\t\t\t/g, '\n' + indentOfMarker).replace(/\n\t\t\t\t\t\t/g, '\n' + indentOfMarker + '\t').slice(1)
+  const inserted = out.slice(0, lineStartOfMarker) + ordinaryLines + '\n' + indentOfMarker + out.slice(markerAt)
+  let upgraded = inserted
+  if (inserted.split(MENU_ORDINARY_RPC_OLD).length !== 2) throw new Error('干净清理锚点缺失/不唯一：' + label + '-menu-ordinary-upgrade(普通RPC旧形态不唯一)')
+  upgraded = upgraded.replace(MENU_ORDINARY_RPC_OLD, MENU_ORDINARY_RPC_NEW)
+  // 旧 marked 升级的两缝幂等：作者缝先跑（那时还是数字行），purge 后插普通行——retry 前缀必须在这里恰好补一次。
+  if (upgraded.includes('const [rollbackRetryState,')) {
+    if (upgraded.split(MENU_ORDINARY_RPC_NEW).length !== 2) throw new Error('干净清理锚点缺失/不唯一：' + label + '-menu-ordinary-upgrade(普通RPC形态不唯一)')
+    upgraded = upgraded.replace('{ expectedTurn: ordinaryTurn }', RETRY_RPC_NEW)
+  }
+  return upgraded
+}
 const PLAY_MENU_RPC_NEXT = `${MARKER_PLAY}
 var menuFailureTarget = clearIncomplete ? (rollbackViewState.view && rollbackViewState.view.failureTarget) || null : null;
 					if (clearIncomplete && !menuFailureTarget) throw new Error('当前没有可安全清理的失败目标，不发送清理请求');/*DSH_PURGE_CLEAR_GUARD*/
@@ -152,6 +222,80 @@ var menuFailureTarget = clearIncomplete ? (rollbackViewState.view && rollbackVie
 						tavernCoordination.invalidate(props.sessionId);
 						return result;
 					}/*DSH_PURGE_CLEAR_WAIT*/`
+// 当前菜单只委托共享服务；回执身份/同连接等待/定向刷新均归 cleanFailure。
+const MENU_DELEGATED_MARKER = '// [dsh-tavern-error-purge-menu-delegated:v1]'
+const PLAY_MENU_DELEGATED = `${MARKER_PLAY}
+${MENU_DELEGATED_MARKER}
+var menuFailureTarget = clearIncomplete ? (rollbackViewState.view && rollbackViewState.view.failureTarget) || null : null;
+					if (clearIncomplete && !menuFailureTarget) throw new Error('当前没有可安全清理的失败目标，不发送清理请求');
+					const result = clearIncomplete
+						? await (async function () {
+							var menuStorageUi = typeof props.storageUi === "function" ? props.storageUi() : undefined;
+							if (!menuStorageUi || typeof menuStorageUi.cleanFailure !== "function") throw new Error("精简清理未接线：找不到共享 tavernStorageUi.cleanFailure，拒绝清理");
+							return await menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget);
+						})()
+						: await rpc("rollbackTurn", { expectedTurn: targetTurn }, props.sessionId);
+					if (clearIncomplete) {
+						setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null);
+						return result;
+					}`
+const ROLLBACK_UI_OLD = 'React.createElement(TavernRollbackAction, props)'
+const ROLLBACK_UI_NEW = 'React.createElement(TavernRollbackAction, Object.assign({}, props, { storageUi: function () { return ctx.get("tavernStorageUi") } }))'
+function ensureRollbackUiWiring(source) {
+  const oldHits = source.split(ROLLBACK_UI_OLD).length - 1
+  const newHits = source.split(ROLLBACK_UI_NEW).length - 1
+  if (oldHits === 0 && newHits === 1) return source
+  if (oldHits === 1 && newHits === 0) return source.replace(ROLLBACK_UI_OLD, ROLLBACK_UI_NEW)
+  throw new Error('干净清理菜单共享接线缺失/不唯一：old=' + oldHits + ',new=' + newHits)
+}
+function ensureDelegatedMenu(source) {
+  let out = source
+  if (!out.includes(MENU_DELEGATED_MARKER)) {
+    // 只升级本包上一代完整菜单块，任何被改动/半截块都拒绝猜删。
+    const rpcAt = renderedClearAt(out)
+    const { comp } = rollbackRegion(out)
+    const markerAt = out.lastIndexOf(MARKER_PLAY, rpcAt)
+    if (markerAt < comp) throw new Error('干净清理菜单升级缺 callback marker')
+    const lineStart = out.lastIndexOf('\n', markerAt) + 1
+    const indent = out.slice(lineStart, markerAt)
+    // 只替换模板的五tab基础缩进一次，余下tab原样保留；不能再次匹配替换后的缩进。
+    const render = text => text.replace(/\n\t{5}/g, () => '\n' + indent)
+    const expectedTurn = out.includes(RETRY_RPC_NEW) ? 'rollbackRetryTarget || ordinaryTurn' : 'ordinaryTurn'
+    const choices = [false, true].map(inline => render(PLAY_MENU_RPC_NEXT
+      .replace('/*DSH_PURGE_CLEAR_GUARD*/', inline ? MENU_CLEAR_GUARD : '')
+      .replace('/*DSH_PURGE_RECEIPT_REQUIRED*/', MENU_RECEIPT_REQUIRED)
+      .replace('/*DSH_PURGE_CLEAR_WAIT*/', inline ? MENU_CLEAR_WAIT_BLOCK : '')
+      .replace('{ expectedTurn: targetTurn }', '{ expectedTurn: ' + expectedTurn + ' }')))
+    const oldBlock = choices.find(text => out.slice(markerAt).startsWith(text))
+    if (!oldBlock) throw new Error('干净清理菜单旧块不完整/被修改，拒绝猜删')
+    out = out.slice(0, markerAt) + render(PLAY_MENU_DELEGATED.replace('{ expectedTurn: targetTurn }', '{ expectedTurn: ' + expectedTurn + ' }')) + out.slice(markerAt + oldBlock.length)
+    // 旧菜单的成功刷新已移到共享服务；普通回退仍保作者 wait（及 R2 凭据清空）。
+    if (out.includes(MENU_WAIT_NEXT)) out = out.replace(MENU_WAIT_NEXT, MENU_WAIT_ANCHOR)
+    else {
+      // 作者重试缝在wait后插入成功清空，旧完整句因此被分开；只移除确切的本包clear尾句。
+      const oldWait='if (!(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) ' + MENU_WAIT_ANCHOR
+      const oldRefresh=' if (clearIncomplete && result && result.view && result.view.rolledBack) { liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId); }'
+      if (out.includes(oldWait)) {
+        out=once(out,oldWait,MENU_WAIT_ANCHOR,'旧菜单重试wait移交')
+        out=once(out,oldRefresh,'','旧菜单重试refresh移交')
+      }
+    }
+  }
+  const { comp, end } = rollbackRegion(out)
+  let callback = out.slice(comp, end)
+  const finallyOld = 'setRolling(false); liveTavernView.invalidate(props.sessionId); tavernCoordination.invalidate(props.sessionId);'
+  const finallyNew = 'setRolling(false); if (!clearIncomplete) { liveTavernView.invalidate(props.sessionId); tavernCoordination.invalidate(props.sessionId); }'
+  if (callback.includes(finallyOld)) callback = once(callback, finallyOld, finallyNew, '菜单finally移交共享刷新')
+  out = out.slice(0, comp) + callback + out.slice(end)
+  for (const needle of ['var menuStorageUi = typeof props.storageUi === "function" ? props.storageUi() : undefined;',
+    'if (!menuStorageUi || typeof menuStorageUi.cleanFailure !== "function") throw new Error("精简清理未接线：找不到共享 tavernStorageUi.cleanFailure，拒绝清理");',
+    'menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget)',
+    'if (clearIncomplete) {', 'return result;']) {
+    if (!callback.includes(needle)) throw new Error('干净清理菜单共享标记不完整：' + needle)
+  }
+  if (out.split(MENU_DELEGATED_MARKER).length !== 2 || callback.includes('var menuMismatch') || callback.includes('var targetCompare = function')) throw new Error('干净清理菜单共享标记不完整')
+  return ensureRollbackUiWiring(out)
+}
 function once(source, anchor, replacement, label) {
   if (source.split(anchor).length !== 2) throw new Error('干净清理锚点缺失/不唯一：' + label)
   return source.replace(anchor, replacement)
@@ -229,8 +373,10 @@ function ensurePurgeCoordinationWiring(source) {
   const sharedHits = (source.match(/storageUi\.cleanFailure\(|ctx\.get\("tavernStorageUi"\)|ctx\.get\('tavernStorageUi'\)/g) || []).length
   if (oldHits !== pairs) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=' + oldHits + '，旧配对=' + pairs + '，新配对=' + newHits)
   if (oldHits === 0) {
-    // 严格 2：拆出共享清理后组件内只应剩 2 对（4 说明未拆干净，0 说明接线缺失）；共享消费者必须在位。
-    if (newHits !== 2 || sharedHits < 1) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=0，新配对=' + newHits + '，共享消费者=' + sharedHits)
+    // 已委托菜单不再内联清理配对；只有已安装作者同步链的普通回退catch保留一次。
+    const catchPairs=source.includes('// [dsh-tavern-rollback-error-refresh:v1]') ? 1 : 0
+    const expected=source.includes(MENU_DELEGATED_MARKER) ? catchPairs : 2 + catchPairs
+    if (newHits !== expected || sharedHits < 1) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=0，新配对=' + newHits + '，共享消费者=' + sharedHits)
     return source
   }
   if (newHits !== 0 || pairs !== oldHits) throw new Error('干净清理协调接线缺失/归属不明确：旧调用=' + oldHits + '，旧配对=' + pairs + '，新配对=' + newHits)
@@ -269,6 +415,17 @@ export function applyErrorPurgeTurnControlsTransform(source) {
   return out
 }
 export function applyErrorPurgePlayControlsTransform(source) {
+  if (source.includes(MENU_DELEGATED_MARKER)) {
+    for (const needle of ['onToggle: undefined,', 'const failureViewRef = React.useRef(state);', 'failureViewRef.current = state;',
+      'get failureTarget() { return failureViewRef.current.view && failureViewRef.current.view.failureTarget || null }',
+      'get failureCleanupReason() { return failureViewRef.current.view && failureViewRef.current.view.failureCleanupReason ||',
+      'const failureTargetKey = (function (view) {', 'field(target.endSeq)', 'field(target.rollbackId)', '[props.sessionId, revision, failureTargetKey]);',
+      'storageUi.cleanFailure(props.sessionId, turn, failureTarget || liveTarget)', 'if (clearIncomplete) {']) {
+      if (!source.includes(needle)) throw new Error('干净清理共享标记不完整：' + needle)
+    }
+    if (source.split(MARKER_PLAY).length !== 4 || source.includes(PLAY_DEPS_ANCHOR)) throw new Error('干净清理共享标记数量/依赖不完整')
+    return ensurePurgeCoordinationWiring(ensureDelegatedMenu(upgradeOrdinaryMenuRpc(ensureSupersededSessionsWiring(source, 'play-controls'), 'play-controls')))
+  }
   if (source.includes(MARKER_PLAY)) {
     // 核实际共享消费者及各布局等待合同；不要求已经退出算法的说明文字，也不禁止旧内联布局必需的 clear-only wait。
     if (source.split(MARKER_PLAY).length !== 4 || !source.includes('onToggle: undefined,') || !source.includes('get failureTarget()')
@@ -280,9 +437,9 @@ export function applyErrorPurgePlayControlsTransform(source) {
       || source.split('[props.sessionId, revision, failureTargetKey]);').length !== 2
       || source.includes(PLAY_DEPS_ANCHOR)) throw new Error('干净清理标记不完整（play-controls）')
     if (source.split(PLAY_STATE_ANCHOR).length !== 2) throw new Error('干净清理锚点缺失/不唯一：play-controls-state')
-    // 旧版已施缝（PLAY marker 齐全）但缺 sessions 接线：仍过 helper **精确补齐一次**，再次调用 no-op；
+    // 旧版已施缝（PLAY marker 齐全）但缺 sessions 接线/普通目标行：仍过 helper **精确补齐一次**，再次调用 no-op；
     // 不新增 PLAY marker（marker 统计恒为 4），也不重施其余变换。
-    return ensurePurgeCoordinationWiring(ensureSupersededSessionsWiring(source, 'play-controls'))
+    return ensureDelegatedMenu(upgradeOrdinaryMenuRpc(ensurePurgeCoordinationWiring(ensureSupersededSessionsWiring(source, 'play-controls')), 'play-controls'))
   }
   let out = once(source, PLAY_ONTOGGLE_OLD, PLAY_ONTOGGLE_NEXT, 'onToggle→onPurge')
   // 菜单 RPC 行：built 经 sync 链后带 \t 缩进与混合换行，仅行内容替换，不碰行首缩进。
@@ -301,6 +458,19 @@ export function applyErrorPurgePlayControlsTransform(source) {
     .replace('/*DSH_PURGE_CLEAR_WAIT*/', waitHits === 1 ? '' : MENU_CLEAR_WAIT_BLOCK)
   const rpcNext = menuText.replace(/\n\t\t\t\t\t/g, '\n' + indent).replace(/\n\t\t\t\t\t\t/g, '\n' + indent + '\t')
   out = out.slice(0, lineStart) + rpcNext + out.slice(lineStart + PLAY_MENU_RPC_OLD.length)
+  // R2 普通目标：目标行插在清洗块之前（clear-only 守卫的失败判定不动），普通 RPC 行换成对象凭据。
+  // 清洗块按真实缩进定位；标题行插入点用行的前缀回填，避免对缩进/空白做假设。
+  const markerAt = (() => { const {comp,end}=rollbackRegion(out); const at=out.indexOf(MARKER_PLAY,comp); if(at<0||at>=end) throw new Error('干净清理锚点缺失/不唯一：menu-rpc-failureTarget'); return at })()
+  const lineStartOfMarker = out.lastIndexOf('\n', markerAt) + 1
+  const indentOfMarker = out.slice(lineStartOfMarker, markerAt)
+  const ordinaryLines = MENU_ORDINARY_TURN.replace(/\n\t\t\t\t\t/g, '\n' + indentOfMarker).replace(/\n\t\t\t\t\t\t/g, '\n' + indentOfMarker + '\t').slice(1)
+  out = out.slice(0, markerAt) + ordinaryLines + '\n' + indentOfMarker + out.slice(markerAt)
+  if (out.split(MENU_ORDINARY_RPC_OLD).length !== 2) throw new Error('干净清理锚点缺失/不唯一：menu-rpc-ordinary')
+  out = out.replace(MENU_ORDINARY_RPC_OLD, MENU_ORDINARY_RPC_NEW)
+  // R2 重试闭环（作者侧 state）：普通回退必须优先使用「本次失败保留下来的同目标凭据」。
+  if (out.includes('const [rollbackRetryState,')) out = out.replace('{ expectedTurn: ordinaryTurn }', '{ expectedTurn: rollbackRetryTarget || ordinaryTurn }')
+  if (out.includes(MENU_ORDINARY_RPC_OLD)) throw new Error('干净清理锚点缺失/不唯一：menu-rpc-ordinary-residue')
+  if (!out.includes(MENU_ORDINARY_ANCHOR)) throw new Error('干净清理锚点缺失/不唯一：menu-ordinary-anchor')
   if (waitHits === 1) out = out.replace(MENU_WAIT_ANCHOR, MENU_WAIT_NEXT)
   else {
     // built/inline 布局的旧软视图行：清理场景不得安装旧 view（常规回退保持原 pipeline）。
@@ -312,5 +482,5 @@ export function applyErrorPurgePlayControlsTransform(source) {
     if (softHits > 1) throw new Error('干净清理锚点缺失/不唯一：menu-soft-view')
     if (softHits === 1) out = out.slice(0, lineStart) + region.replace(SOFT_VIEW_ANCHOR, SOFT_VIEW_NEXT) + out.slice(end)
   }
-  return ensurePurgeCoordinationWiring(ensureSupersededSessionsWiring(applyPlayControlsSupersededState(out, 'play-controls'), 'play-controls'))
+  return ensureDelegatedMenu(ensurePurgeCoordinationWiring(ensureSupersededSessionsWiring(applyPlayControlsSupersededState(out, 'play-controls'), 'play-controls')))
 }

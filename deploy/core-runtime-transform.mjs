@@ -37,56 +37,9 @@ const SNIPPET = '// [dsh-tavern:core-runtime]'
 export const SERVER_EXECUTION_SHIM_REL = 'lib/domain/storage-server-execution.js'
 const SHIM_SPECIFIER = "import { createServerExecution } from './storage-server-execution.js'"
 
-/** 历史薄垫片模板（非当前写盘消费者）；最终生产shim由standard-seams.mjs独占组装。 */
-export const SERVER_EXECUTION_SHIM = `// ⚠ 部署件：dsh-tavern 服务端 MVU 执行消费者（作者树薄垫片）
-// 真实现归 dsh-tavern-sqlite-v2（lib/server-execution.js）；作者应用树与 profile 包不在同一
-// 解析祖先链，必须按 profile 锚点解析（与 chat-sqlite-store.js 垫片同一模式），不能写裸包说明符。
-//
-// DI：作者这一份 projectTavernHelperScripts / isHostOwnedMvu 注入实现（脚本筛选只有一套，
-// 不 fork 作者代码）。**脚本分类不需要作者导出** —— B 2.4 的 tavern-helper-scripts.js 只有
-// isHostOwnedMvu / projectTavernHelperScripts / hasTavernScriptRuntime，没有 classifyCardScript，
-// 分类由包内 server-execution.classifyCardScript 提供（默认「不认识即 server-compute，排除 esm/DOM及浏览器独有facade引用」）。
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import os from 'node:os'
-import path from 'node:path'
-import * as helperScripts from './tavern-helper-scripts.js'
-
-const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh-tavern')
-async function loadOwned(name) {
-  for (const anchor of [path.join(home, 'profiles', 'tavern', 'package.json'), path.join(home, 'apps', 'dsh-tavern', 'package.json')]) {
-    try { return await import(pathToFileURL(createRequire(anchor).resolve('dsh-tavern-sqlite-v2/' + name)).href) } catch { /* 换下一个锚点 */ }
-  }
-  return null
-}
-
-const impl = await loadOwned('server-execution')
-if (impl === null) console.error('[storage-server-execution] 解析不到 dsh-tavern-sqlite-v2/server-execution（已按 profile 锚点找过）')
-const project = helperScripts.projectTavernHelperScripts
-const isHostOwnedMvu = helperScripts.isHostOwnedMvu
-if (typeof project !== 'function') console.error('[storage-server-execution] 作者树 tavern-helper-scripts.js 缺少 projectTavernHelperScripts')
-
-export function createServerExecution(options = {}) {
-  if (impl === null) throw new Error('未安装 dsh-tavern-sqlite-v2：服务端 MVU 执行不可用')
-  return impl.createServerExecution({
-    ...options,
-    project: options.project ?? project,
-    isHostOwnedMvu: options.isHostOwnedMvu ?? isHostOwnedMvu,
-  })
-}
-
-// view / helperRuntime 过滤用：只保 classify !== 'server-compute' 且非宿主 MVU 核心的脚本。
-export function storageBrowserScripts(scripts, deps = {}) {
-  if (impl === null) throw new Error('未安装 dsh-tavern-sqlite-v2：脚本分派过滤不可用')
-  return impl.storageBrowserScripts(scripts, { isHostOwnedMvu, ...deps })
-}
-
-// view 的 mvu.serverOwned 来源：变量核心归服务端，前端据此不初始化浏览器 MVU core。
-export function mvuRuntimeOwnership(input = {}) {
-  if (impl === null) throw new Error('未安装 dsh-tavern-sqlite-v2：运行时归属投影不可用')
-  return impl.mvuRuntimeOwnership({ project, isHostOwnedMvu, ...input })
-}
-`
+// 最终生产shim由standard-seam-transforms.mjs独占组装；旧路径常量保留兼容引用。
+// [R04 退役] SERVER_EXECUTION_SHIM 旧模板本体已移除：当前 writer（standard-seam-transforms.mjs）不读取它，
+// 薄垫片由标准 writer 自行生成；marker/transform 逻辑保持不变。
 
 // ---------- 作者源码锚点（B 2.4 权威源逐字；缩进已用 repr 核对，勿凭印象改） ----------
 const IMPORT_ANCHOR = "import { createMvuSettlementEffect } from './mvu-settlement-effect.js'\n"

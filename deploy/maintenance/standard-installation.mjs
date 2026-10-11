@@ -118,6 +118,23 @@ function assertSafe(file, home) {
 function manifestAt(dir, name) {
   if (!existsSync(path.join(dir, 'package.json')) || json(path.join(dir, 'package.json')).name !== name) throw Error('不能认领无清单或其他包目录：' + dir)
 }
+/**
+ * 本包自有完整性准入：`bootstrap/` 自带独立清单，而宿主活动插件包身份解析（活动 Loader 条目 →
+ * 模块最近 package.json）要求其 name 与 version 都非空字符串，缺一个就在**请求扩展准备**期抛
+ * （表现为「装配成功、启动正常，下一轮发消息直接失败」）。故在安装预检拦截；只判非空字符串
+ * （与宿主同口径），不要求等于根包版本，也不引入作者版本或原版认证。
+ */
+function assertBootstrapManifestComplete(root) {
+  const file = path.join(root, 'bootstrap', 'package.json')
+  if (!existsSync(file)) throw Error('本包不完整：启动入口缺清单 ' + file)
+  let manifest
+  try { manifest = json(file) } catch (error) { throw Error('启动入口清单无法解析：' + file + '（' + String(error && error.message) + '）') }
+  for (const field of ['name', 'version']) {
+    if (typeof manifest?.[field] !== 'string' || manifest[field].length === 0) {
+      throw Error(`启动入口清单缺非空 ${field}（宿主活动插件包身份解析要求 name 与 version 都非空）：${file}；缺 version 会让装配后的首个请求在请求扩展准备期失败`)
+    }
+  }
+}
 export function createStandardInstallation({ op, adapter, packageRoot, evidence, linkPeers = () => {} }) {
   const name = adapter.packageName, pluginDir = pluginDirFor({ home: op.home, packageName: name })
   const link = path.join(op.profileDir, 'node_modules', name), oldDir = path.join(op.home, 'plugins', name)
@@ -254,6 +271,9 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
     if (captured) assertUnchanged()
     for (const file of [...paths, profileFile, patchFile]) assertSafe(file, op.home)
     state = inspect(); capture()
+    // 本包自有清单完整性：标准目录/持久装配变更之前先拒（缺非空 name/version 的启动入口清单会让
+    // 装配后的首个请求在宿主请求扩展准备期失败）。只判输入包根；copyPackage 逐字节复制，故无需再判 incoming。
+    if (action === 'install') assertBootstrapManifestComplete(packageRoot)
     // 提前校验归属/配置冲突，不在停服后才发现不可安装的 patch。
     if (action === 'install') installOwnedRows(expected.patch?.toString('utf8'), { pluginDir, home: op.home })
     else uninstallOwnedRows(expected.patch?.toString('utf8'), { pluginDir })

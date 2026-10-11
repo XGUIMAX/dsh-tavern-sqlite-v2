@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fsDefault from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { syncBuiltinESMExports, createRequire } from 'node:module'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync, existsSync, lstatSync, readlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -436,4 +436,93 @@ test('标准装配：归属冲突和双源拒绝且不改用户现场', async t 
   const conflict = createStandardInstallation({ op: f, adapter: { packageName: NAME }, packageRoot: product, evidence: path.join(f.root, 'conflict-evidence') })
   await assert.rejects(conflict.preflight('install'), /双源/)
   assert.deepEqual(readFileSync(profileFile), before)
+})
+
+// 真实桌面 runtime 的请求扩展贡献者（dsh-plugin-package-inventory-deepseek）按"活动 Loader 条目 → 模块最近 package.json"
+// 解析包身份，且要求该清单的 name 与 version 都非空；bootstrap 清单缺 version 会让整轮 prepare 抛（宿主表现为 REQUEST_EXTENSION）。
+// 本叶只走真实链路：真实装配产物路径 → 真实 SDK 的 register（捕获唯一 provider.prepare）→ 缺 version 必 rejects，恢复字节后成功。
+test('标准装配：真实请求扩展对 bootstrap 缺 version 拒绝、补 version 后通过', async t => {
+  const f = fixture(t)
+  const rootPkg = JSON.parse(readFileSync(path.join(product, 'package.json'), 'utf8'))
+  const bootstrapFile = path.join(f.pluginDir, 'bootstrap', 'package.json')
+  const sourceBootstrap = readFileSync(path.join(product, 'bootstrap', 'package.json'), 'utf8')
+  assert.equal(JSON.parse(sourceBootstrap).version, rootPkg.version, '装配源 bootstrap 清单必须带与根包一致的 version')
+  await f.assembly.preflight('install'); await f.assembly.manage('install')
+  const bootstrap = JSON.parse(readFileSync(bootstrapFile, 'utf8'))
+  assert.equal(bootstrap.name, 'dsh-tavern-sqlite-v2-bootstrap')
+  assert.equal(bootstrap.version, rootPkg.version, '装配产物 bootstrap 清单必须带与根包一致的 version')
+  const checkout = process.env.DSH_CHECKOUT || 'D:/Program Files (x86)/DSH Desktop/resources/app'
+  const requireFromCheckout = createRequire(path.join(checkout, 'package.json'))
+  const inventory = await import(pathToFileURL(requireFromCheckout.resolve('@deepseek-ai/dsh-plugin-package-inventory-deepseek')).href)
+  const hostBaseUrl = pathToFileURL(path.join(f.profileDir, 'package.json')).href
+  const entryOf = name => ({ options: { name }, fiber: { state: 2 }, parent: { tree: { ctx: { baseUrl: hostBaseUrl } } } })
+  // 真实活动形状：early 三行 + 普通入口 plugin.js，都指向装配产物内的确切绝对 installed paths。
+  const entries = [...PERSISTED_ROWS.map(row => path.join(f.pluginDir, row.file)), path.join(f.pluginDir, 'plugin.js')].map(entryOf)
+  let provider
+  const fakeCtx = {
+    loader: { entries: () => entries },
+    get: () => undefined,
+    baseUrl: hostBaseUrl,
+    deepseekLlmApiExtensions: { register: (field, value) => { assert.equal(field, 'dsh_plugin_packages'); provider = value; return () => {} } },
+  }
+  inventory.apply(fakeCtx, { enabled: true })
+  assert.equal(typeof provider?.prepare, 'function', '真实 apply 必须注册 dsh_plugin_packages 的 prepare')
+  const prepare = () => provider.prepare({ body: {}, signal: new AbortController().signal })
+  // 缺 version 一次：真实 resolver 不缓存失败，恢复字节后同一 provider 再调即可成功。
+  writeFileSync(bootstrapFile, JSON.stringify({ name: bootstrap.name, private: true, type: 'module' }, null, 2) + '\n', 'utf8')
+  await assert.rejects(prepare(), /must declare non-empty name and version/, '缺 version 的 bootstrap 清单必须让真实请求扩展 prepare 拒绝')
+  writeFileSync(bootstrapFile, sourceBootstrap, 'utf8')
+  const prepared = await prepare()
+  const packages = prepared.value.packages
+  assert.equal(prepared.value.version, 1)
+  assert.ok(packages.some(item => item.name === bootstrap.name && item.version === rootPkg.version),
+    '请求字段必须含 bootstrap 身份与 043 版号：' + JSON.stringify(packages))
+  assert.ok(packages.some(item => item.name === NAME && item.version === rootPkg.version),
+    '请求字段必须含插件本体身份与 043 版号：' + JSON.stringify(packages))
+})
+
+// 上一叶证的是"装好之后真实请求扩展会拒绝缺 version 的清单"（事后证据）；本叶补的是**安装预检**这一道：
+// 命中前不得有任何写盘（不建标准目录/不改 fixture 源清单），修正清单后同一 installation 的 preflight 必须通过。
+// 只按宿主同一口径判"非空字符串"，不要求等于根包版本（inventory 只要求非空）。
+function bootstrapPreflightFixture(t) {
+  const root = mkdtempSync(path.join(tmpdir(), 'standard-bootstrap-preflight-'))
+  t.after(() => { assert.ok(path.basename(root).startsWith('standard-bootstrap-preflight-')); rmSync(root, { recursive: true, force: true }) })
+  const source = path.join(root, 'source-package'), home = path.join(root, 'home'), profileDir = path.join(home, 'profiles', 'tavern')
+  mkdirSync(path.join(source, 'bootstrap'), { recursive: true })
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(path.join(source, 'package.json'), JSON.stringify({ name: NAME, version: '0.0.0-test', private: true, type: 'module' }, null, 2) + '\n', 'utf8')
+  const bootstrapFile = path.join(source, 'bootstrap', 'package.json')
+  const versioned = JSON.stringify({ name: NAME + '-bootstrap', version: '0.0.0-test', private: true, type: 'module' }, null, 2) + '\n'
+  writeFileSync(bootstrapFile, versioned, 'utf8')
+  writeFileSync(path.join(profileDir, 'package.json'), '{"name":"dsh-profile-tavern","dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n', 'utf8')
+  writeFileSync(path.join(profileDir, 'cordis.patch.yml'), USER, 'utf8')
+  const pluginDir = pluginDirFor({ home, packageName: NAME })
+  const assembly = createStandardInstallation({ op: { home, profileDir }, adapter: { packageName: NAME }, packageRoot: source, evidence: path.join(root, 'evidence') })
+  return { root, source, bootstrapFile, versioned, pluginDir, assembly }
+}
+
+test('标准装配：预检拒绝缺非空 name/version 的启动入口清单且零现场写，补齐后同一装配可通过', async t => {
+  const f = bootstrapPreflightFixture(t)
+  const patchFile = path.join(f.root, 'home', 'profiles', 'tavern', 'cordis.patch.yml')
+  const beforePatch = readFileSync(patchFile)
+  assert.equal((await f.assembly.preflight('install')).present, false, '隔离 fixture 初始未装配')
+  assert.equal(existsSync(f.pluginDir), false, '预检不得创建标准目录')
+  assert.deepEqual(readFileSync(patchFile), beforePatch, '预检不得改 patch 现场')
+  for (const [label, broken, pattern] of [
+    ['缺 version', JSON.stringify({ name: NAME + '-bootstrap', private: true, type: 'module' }, null, 2) + '\n', /缺非空 version/],
+    ['version 空串', JSON.stringify({ name: NAME + '-bootstrap', version: '', private: true, type: 'module' }, null, 2) + '\n', /缺非空 version/],
+    ['缺 name', JSON.stringify({ version: '0.0.0-test', private: true, type: 'module' }, null, 2) + '\n', /缺非空 name/],
+    // JSON 字面 null 是可解析但无 name/version 的清单：必须给出可读拒绝，不得 TypeError。
+    ['清单为 JSON null', 'null\n', /缺非空 name/],
+  ]) {
+    writeFileSync(f.bootstrapFile, broken, 'utf8')
+    await assert.rejects(f.assembly.preflight('install'), pattern, label + '的启动入口清单必须在预检被拒')
+    assert.equal(readFileSync(f.bootstrapFile, 'utf8'), broken, label + '：拒绝时不得改源目录清单')
+    assert.equal(existsSync(f.pluginDir), false, label + '：拒绝时不得建标准目录')
+    assert.deepEqual(readFileSync(patchFile), beforePatch, label + '：拒绝时不得改 patch')
+  }
+  writeFileSync(f.bootstrapFile, f.versioned, 'utf8')
+  assert.equal((await f.assembly.preflight('install')).present, false, '清单补齐后同一装配必须可预检通过')
+  assert.equal(existsSync(f.pluginDir), false, '预检本身不落盘（只读准入）')
+  assert.deepEqual(readFileSync(patchFile), beforePatch, '预检不写 patch 现场')
 })

@@ -134,8 +134,9 @@ test('接缝：幂等 —— 对已装缝的 index.js 二次应用不变', () =>
 
 test('接缝：从**干净作者源**（镜像回放）出发也能装出 S2(d)', t => {
   const gzPath = process.env.AUTHOR_CLEAN_IMAGES
-  if (!gzPath || !existsSync(gzPath)) return t.skip('未提供 AUTHOR_CLEAN_IMAGES（镜像集只在已安装插件里）')
-  const { cleanIndexSource } = loadCleanIndexSource(gzPath)
+  // 冻结镜像已退役；未显式提供镜像时用同一真实裸作者源码，不能以缺旧资产跳过。
+  const cleanIndexSource = gzPath ? loadCleanIndexSource(gzPath).cleanIndexSource : authorIndexSource()
+  assert.equal(cleanIndexSource.includes('const authorMigrationStore = wrapAuthorMigrationStore(chatJournalStore)'), false, '输入必须未施迁移接缝')
   const patched = transformStorageIndex(cleanIndexSource)
   assert.match(patched, /import \{ createChatSqliteStore, wrapAuthorMigrationStore \} from '\.\/domain\/chat-sqlite-store\.js'/)
   assert.match(patched, /const authorMigrationStore = wrapAuthorMigrationStore\(chatJournalStore\)/)

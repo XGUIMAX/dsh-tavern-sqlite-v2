@@ -1,10 +1,12 @@
-// PR13实际标准装卸与作者迁移入口；缺作者源码显式失败，不读用户存档。
+// PR13 作者迁移入口（第 2 叶）；缺作者源码显式失败，不读用户存档。
+// 注：原第 1 叶「首装后 storage-failure-state 桥 ACTIVE 且 ready，卸载后桥消失而作者原目标文本保留」
+// 已迁入 **test/support/pr13-positive-observers.mjs**（经 test/standard-positive.test.mjs 注册），
+// 改为观察共享生命周期阶段快照（不再在本文件自己 prepareCommentAuthorTree/装卸）；用例名保持不变。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { applyStandardSeams, uninstallStandardSeams, checkStandardSeams } from '../deploy/standard-seams.mjs'
-import { prepareCommentAuthorTree, commentAuthorTreeSource } from './fixtures/comment-author-tree.mjs'
+import { commentAuthorTreeSource } from './fixtures/comment-author-tree.mjs'
 import { wrapAuthorMigrationStore } from '../lib/author-migration-adapter.js'
 
 function authorTavernPlugin() {
@@ -13,28 +15,6 @@ function authorTavernPlugin() {
   if (!explicit && !from) throw new Error('缺少作者夹具：请设置 DSH_TAVERN_TEST_APP 或 AUTHOR_TAVERN_PLUGIN')
   return explicit || path.join(from, 'tavern-plugin')
 }
-
-test('PR13安装合同1：首装后storage-failure-state桥ACTIVE且ready，卸载后桥消失而作者原目标文本保留', () => {
-  const prepared = prepareCommentAuthorTree()
-  if (!prepared) throw new Error('缺少作者夹具：请设置 DSH_TAVERN_TEST_APP')
-  const { appDir, cleanup } = prepared
-  try {
-    const applied = applyStandardSeams({ appDir, assertStopped: () => true })
-    assert.equal(applied.ready, true)
-    assert.equal(checkStandardSeams({ appDir }).ready, true)
-    const bridge = path.join(appDir, 'tavern-plugin/lib/domain/storage-failure-state.js')
-    assert.equal(existsSync(bridge), true)
-    assert.ok(readFileSync(bridge, 'utf8').includes("await storagePackage('failure-state')"))
-    const turnSource = readFileSync(path.join(appDir, 'tavern-plugin/lib/domain/turn-orchestration.js'), 'utf8')
-    assert.ok(turnSource.includes("import { ledgerFailureState } from './storage-failure-state.js'"))
-    assert.ok(readFileSync(path.join(appDir, 'tavern-plugin/lib/index.js'), 'utf8').includes('store: authorMigrationStore'))
-    uninstallStandardSeams({ appDir, assertStopped: () => true })
-    assert.equal(existsSync(bridge), false)
-    for (const [rel, original] of prepared.original) {
-      assert.equal(readFileSync(path.join(appDir, rel), 'utf8'), original, '卸载保留作者文本：' + rel)
-    }
-  } finally { cleanup() }
-})
 
 test('PR13安装合同2：真作者conversation-migration下status报native、migrate零写且legacy原档拒', async () => {
   const source = readFileSync(path.join(authorTavernPlugin(), 'lib/domain/conversation-migration.js'), 'utf8')

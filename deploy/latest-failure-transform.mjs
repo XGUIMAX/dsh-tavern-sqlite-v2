@@ -3,6 +3,13 @@
 // 前端一律"最新优先"：native 末轮更晚（或同轮但无 body 操作）时必须先物理清它，不得把更旧的 body 目标当当前失败。
 const HOST_MARKER = '// [dsh-tavern-latest-failure-host:v1]'
 const VIEW_MARKER = '// [dsh-tavern-latest-failure-view:v1]'
+// R1 冷普通回退证据：宿主 DI 用 **SDK 真 fold** 派生当前模型面 seq 列表（唯一权威仍是 events）。
+// `sessionQuery.observeSession` 真身（SessionObservationReader.preparedLease/live）不公开 surface/nodes，
+// 作者nodes是有序模型面，不能把按seq排序的current记录集合冒充顺序；直接消费SDK的真实fold.nodes。
+const EVIDENCE_FOLD_LINE = "import { foldSurface as foldSurfaceForEvidence } from '@deepseek-ai/dsh-session'\n"
+// 作者 2.5 `rollbackViewFields` 里**唯一一行**节点推导；冷档（无 session）改用证据节点，live 仍走 session.surface.nodes。
+const AUTHOR_NODES_LINE = 'const nodes = session?.surface?.nodes\n'
+const AUTHOR_NODES_NEXT = 'const nodes = session?.surface?.nodes ?? evidence.nodes\n'
 // 上一代（marked）helper 的**完整字面**：迁移只认这个整段，逐字替换为新 helper；半截/未知形状由后续 required 检查抛错。
 const LEGACY_HELPER = `function latestFailureTarget(chat, replayTarget, evidence) {
   // 窗口投影副本（session-window-projector:148）显式把 _storageRevision 置 undefined 以保作者窗口形状，
@@ -60,7 +67,9 @@ const EVIDENCE_IMPORT = "import { readFailureEvidence as readFailureEvidenceFrom
 const EVIDENCE_ANCHOR = '  function sessionDebugEvidence(sessionId, includeSession = false) {'
 const EVIDENCE_CALL_BEFORE = 'const rollbackEvidence = sessionDebugEvidence(chat.sessionId, true)'
 const EVIDENCE_CALL_AFTER = 'const rollbackEvidence = await readFailureEvidence(chat.sessionId)'
-const EVIDENCE_METHOD = "async function readFailureEvidence(sessionId) { return await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId) }"
+// 证据读口方法体**只含函数**（不夹 import；折叠导入由最终 return 一次性前置到顶层）。
+const EVIDENCE_METHOD_LEGACY = "async function readFailureEvidence(sessionId) { return await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId) }"
+const EVIDENCE_METHOD = "async function readFailureEvidence(sessionId) { return await readFailureEvidenceFromQuery(sessionDebugEvidence(sessionId, true), ctx.get('sessionQuery'), sessionId, (_id, events) => typeof sessionPatch?.surfaceNodes === 'function' ? sessionPatch.surfaceNodes(events) : foldSurfaceForEvidence(events).nodes) }"
 function once(source, before, after) {
   if (source.split(before).length !== 2) throw new Error('最新失败接缝锚点缺失/不唯一：' + before.slice(0, 90))
   return source.replace(before, after)
@@ -73,8 +82,14 @@ export function applyLatestFailureHostTransform(source) {
   const afterNew = "        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && (args.failureTarget || args.expectedTurn))"
   if (source.includes(HOST_MARKER)) {
     if (source.split(HOST_MARKER).length !== 2 || !(source.includes(after) || source.includes(afterNew)) || !source.includes(EVIDENCE_IMPORT)
-      || !source.includes(EVIDENCE_METHOD) || !source.includes(EVIDENCE_CALL_AFTER)) throw new Error('最新失败宿主接线不完整')
-    return source
+      || !source.includes(EVIDENCE_CALL_AFTER)) throw new Error('最新失败宿主接线不完整')
+    // 已 marked 的旧代证据读口（无真 fold 推导、无折叠导入）必须**可升级**，不能只判"不完整"就拒。
+    if (source.includes(EVIDENCE_METHOD) && source.includes(EVIDENCE_FOLD_LINE)) return source
+    const prior=EVIDENCE_METHOD_LEGACY
+    if (!source.includes(prior)) throw new Error('最新失败宿主证据读口缺失/未知形状')
+    // 升级：完整旧读口只替换一次，折叠导入只补一次且留在顶层。
+    const upgraded = once(source, prior, EVIDENCE_METHOD)
+    return upgraded.includes(EVIDENCE_FOLD_LINE) ? upgraded : once(upgraded, EVIDENCE_IMPORT, EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE)
   }
   const hasNew = source.split(beforeNew).length === 2
   const hasLegacy = source.split(before).length === 2
@@ -82,7 +97,8 @@ export function applyLatestFailureHostTransform(source) {
   let next = HOST_MARKER + '\n' + (hasNew ? source.replace(beforeNew, afterNew) : source.replace(before, after))
   next = once(next, EVIDENCE_CALL_BEFORE, EVIDENCE_CALL_AFTER)
   next = once(next, EVIDENCE_ANCHOR, '  ' + EVIDENCE_METHOD + '\n' + EVIDENCE_ANCHOR)
-  return EVIDENCE_IMPORT + next
+  // 折叠导入**只此一处**前置到顶层（与证据导入相邻），不插进任何函数体。
+  return EVIDENCE_IMPORT + EVIDENCE_FOLD_LINE + next
 }
 export function applyLatestFailureViewTransform(source) {
   const fields = `      failureTarget: latestFailureTarget(chat, replayTarget, evidence),
@@ -140,7 +156,7 @@ export function applyLatestFailureViewTransform(source) {
   if (turn === null || turn < 1 || !Number.isSafeInteger(revision) || !chat.timeline?.branchId) return null
   if (ending !== 'error' && ending !== 'aborted') return null // 新 body 目标只认终止失败生命周期（active/无 end/completed 都不得签）
   const entry = Object.entries(chat.timeline.operations || {}).find(([id, op]) => op?.kind === 'body' && Number(op.turn) === turn)
-  if (!entry || entry[1].status !== 'failed' || !(entry[1].businessBefore || entry[1].rowBefore)) return null
+  if (!entry || !['failed', 'running'].includes(entry[1].status) || !(entry[1].businessBefore || entry[1].rowBefore)) return null
   if ((chat.timeline.checkpoints || []).some(cp => Number(cp.turn) >= turn)) return null
   if ((chat.messages || []).some(row => Number(row.turn) > turn)) return null
   if (Object.values(chat.timeline.operations || {}).some(op => Number(op?.turn) > turn)) return null
@@ -209,11 +225,19 @@ function latestFailureCleanupReason(chat, replayTarget, evidence) {
       up = once(up, '  if (narrow && narrow.cleanable === true && Number.isSafeInteger(revision) && Number.isSafeInteger(Number(narrow.revision)) && Number(narrow.revision) === Number(revision)',
         "  if (narrow && narrow.cleanable === true && (ending === 'error' || ending === 'aborted')\n    && Number.isSafeInteger(revision) && Number.isSafeInteger(Number(narrow.revision)) && Number(narrow.revision) === Number(revision)")
       up = once(up, "  const entry = Object.entries(chat.timeline.operations || {}).find(([id, op]) => op?.kind === 'body' && Number(op.turn) === turn)\n  if (!entry || entry[1].status === 'completed' || !(entry[1].businessBefore || entry[1].rowBefore)) return null",
-        "  if (ending !== 'error' && ending !== 'aborted') return null\n  const entry = Object.entries(chat.timeline.operations || {}).find(([id, op]) => op?.kind === 'body' && Number(op.turn) === turn)\n  if (!entry || entry[1].status !== 'failed' || !(entry[1].businessBefore || entry[1].rowBefore)) return null")
+        "  if (ending !== 'error' && ending !== 'aborted') return null\n  const entry = Object.entries(chat.timeline.operations || {}).find(([id, op]) => op?.kind === 'body' && Number(op.turn) === turn)\n  if (!entry || !['failed', 'running'].includes(entry[1].status) || !(entry[1].businessBefore || entry[1].rowBefore)) return null")
       up = once(up, '  if (narrow && narrow.cleanable !== true && narrow.reason) return narrow.reason',
         "  if (narrow && narrow.cleanable !== true && narrow.reason) return narrow.reason\n  if (ending === 'active' || ending === 'completed' || ending === 'none') return ''")
       source = up
     }
+    // 已施行的当前代代码（已有 failureEnding，只差 body 候选状态）不走上面那个 if：这里对 source 本体换旧行。
+    // 延迟 discard 读脚本失败会让整次 update 回滚、body 停在 running；候选不等于可直接清，仍有 failureEnding 门禁。
+    if (source.includes("entry[1].status !== 'failed'")) {
+      source = once(source, "  if (!entry || entry[1].status !== 'failed' || !(entry[1].businessBefore || entry[1].rowBefore)) return null",
+        "  if (!entry || !['failed', 'running'].includes(entry[1].status) || !(entry[1].businessBefore || entry[1].rowBefore)) return null")
+    }
+    // R1：作者节点推导改走证据节点（冷档 evidence.nodes / live 仍 session.surface.nodes）；已升级则原样。
+    source = upgradeAuthorNodesLine(source)
     const required = [IMPORT_LINE, helper, fields,
       'const revision = Number.isSafeInteger(chat.windowRevision) ? chat.windowRevision : chat._storageRevision',
       'canClearIncompleteReply: latestFailureTarget(chat, replayTarget, evidence) !== null,',
@@ -232,5 +256,15 @@ function latestFailureCleanupReason(chat, replayTarget, evidence) {
   next = once(next, 'canRollback: true, canClearIncompleteReply: false,', 'canRollback: true, canClearIncompleteReply: !!chat.rollbackPending.failureTarget,')
   // 命中旧rollback缓存也必须重签发当前revision与原因（旧凭据不得续用，说明也不许停在旧视图）。
   next = once(next, 'return {...copyRollback(previous.value),undoRollbackTurn:', cacheHitReturn)
+  next = upgradeAuthorNodesLine(next)
   return next
+}
+
+/** R1：作者 `rollbackViewFields` 的节点推导行 → 冷档回退证据节点。全文件必须**恰一行**，否则拒绝猜测施缝。 */
+function upgradeAuthorNodesLine(source) {
+  const hits = source.split(AUTHOR_NODES_LINE).length - 1
+  const upgraded = source.split(AUTHOR_NODES_NEXT).length - 1
+  if (hits === 0 && upgraded === 1) return source // 已升级（幂等）
+  if (hits !== 1 || upgraded !== 0) throw new Error('作者节点推导行缺失/重复（命中 ' + hits + '，已升级 ' + upgraded + '）—拒绝猜测施缝')
+  return source.replace(AUTHOR_NODES_LINE, AUTHOR_NODES_NEXT)
 }

@@ -1,4 +1,5 @@
 // 替换作者rollbackChat全体为包拥有的唯一编排，升级旧v1后不保留失败软清/undo/script删除副作用。
+import { applyRegenerationRollbackTransform } from './regeneration-rollback-transform.mjs'
 const MARKER='// [dsh-tavern-clean-rollback:v1]'
 const START='  async function rollbackChat(chat, requestedTurn, restoredAgent) {'
 const END='  async function undoRollback(sessionId, chatId) {'
@@ -43,11 +44,11 @@ export function applyCleanRollbackTransform(source) {
  if (source.includes(MARKER) && (source.split(MARKER).length!==2 || source.split(START).length!==2 || source.split(END).length!==2)) throw new Error('统一物理回退消费者重复/边界不唯一')
  if (source.includes('rollbackSyncProvider')) {
   if(!source.includes(SYNC_BODY) || source.split('rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })').length!==2) throw new Error('同连接统一回退消费者不完整')
-  return source
+  return applyRegenerationRollbackTransform(source)
  }
  const legacy=applyLegacyCleanRollbackTransform(source)
  if(legacy.split(BODY).length!==2 || legacy.split('webServerProvider, variableStore, quiesceRollback, cleanupRollbackSides })').length!==2)throw new Error('同连接统一回退升级锚点不唯一')
- return legacy.replace(BODY,SYNC_BODY).replace('webServerProvider, variableStore, quiesceRollback, cleanupRollbackSides })','rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })')
+ return applyRegenerationRollbackTransform(legacy.replace(BODY,SYNC_BODY).replace('webServerProvider, variableStore, quiesceRollback, cleanupRollbackSides })','rollbackSyncProvider, variableStore, quiesceRollback, cleanupRollbackSides })'))
 }
 function applyLegacyCleanRollbackTransform(source) {
  // 外层不能先resume：统一编排已负责活/冷Session，resume的end-seed会被持久屏障拒绝。

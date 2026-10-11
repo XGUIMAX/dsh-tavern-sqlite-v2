@@ -108,7 +108,7 @@ export const ANCHORS = Object.freeze({
 })
 
 export const REQUIRED_BLOCKS = Object.freeze({
-  import: 'import { createSessionWindowProjector, createActivitySummaryBridge } from',
+  import: 'import { createSessionWindowProjector, createActivitySummaryBridge, assembleTavernView } from',
   bridge: 'const activityBridge = createActivitySummaryBridge()',
   activityOf: 'const activityOf = activityBridge.wrap(chat => backgroundTasks.activity(chat))',
   factory: 'const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },',
@@ -156,6 +156,7 @@ export const PENDING_HOST_WIRING = Object.freeze([
 /** 启动时只建空对象；const/let 依赖在首次 project 时取值，避开 projectOpeningWindow 之前的 TDZ。 */
 export const DEFAULT_DEPS_EXPRESSION = `{
     get str() { return str },
+    get assembleTavernView() { return assembleTavernView },
     get readTavernSettings() { return readTavernSettings },
     get readScript() { return readScript },
     get scriptContinuity() { return scriptContinuity },
@@ -226,7 +227,19 @@ function assertBlocks(source) {
 export function applyNativeDataTransform(source, options = {}) {
   if (typeof source !== 'string' || source === '') throw new Error('native-data 转换缺少源码')
   const markers = markerCount(source)
-  if (markers === 1) { assertBlocks(source); return source } // 已应用：逐块验证通过才算幂等
+  if (markers === 1) {
+    // 原代两出口桥原位升级；旧块必须完整，不能把半标记当可升级输入。
+    const oldImport = /import \{ createSessionWindowProjector, createActivitySummaryBridge \} from ('[^']+')/
+    let next = source
+    if (oldImport.test(next)) {
+      if (!next.includes('const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },') || next.includes('get assembleTavernView()')) throw Error('native-data旧组装器接线布局不完整')
+      next = next.replace(oldImport, 'import { createSessionWindowProjector, createActivitySummaryBridge, assembleTavernView } from $1')
+        .replace('const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },', 'const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },\n    get assembleTavernView() { return assembleTavernView },')
+    }
+    assertBlocks(next)
+    if (!next.includes('get assembleTavernView() { return assembleTavernView }') && options.depsExpression === undefined) throw Error('native-data组装器接线不完整')
+    return next
+  } // 已应用：逐块验证通过才算幂等
   if (markers !== 0) throw new Error('native-data 转换标记数异常（半应用）: ' + markers)
   const importPath = options.projectorImportPath
   if (typeof importPath !== 'string' || importPath === '') throw new Error('native-data 转换缺少 projectorImportPath')
@@ -240,7 +253,7 @@ export function applyNativeDataTransform(source, options = {}) {
 
   // ① import
   let next = source.replace(ANCHORS.import,
-    `${NATIVE_DATA_MARKER}\nimport { createSessionWindowProjector, createActivitySummaryBridge } from '${importPath}'\n${ANCHORS.import}`)
+    `${NATIVE_DATA_MARKER}\nimport { createSessionWindowProjector, createActivitySummaryBridge, assembleTavernView } from '${importPath}'\n${ANCHORS.import}`)
 
   // ② 桥必须在 sessionStateView 之前；③ **在 sessionStateView 唯一块内**替换 activity 行（全文该行有 4 处，不能全球替换）
   next = next.replace(SESSION_STATE_BLOCK,

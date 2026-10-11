@@ -4,7 +4,7 @@
 
 ## 支持范围
 
-- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 0.4.3 的适配目标为上游 `a2008bf932031616fd80ec265cbdba5d0b559312`（简称 `a2008bf`，Tavern2.5.0；runtime `68dff3dd` / sequence582）。已发布0.4.2尚不包含本次适配及标准目录改造。
+- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 0.4.4 的适配目标为上游 `a2008bf932031616fd80ec265cbdba5d0b559312`（简称 `a2008bf`，Tavern2.5.0；runtime `68dff3dd` / sequence582）。已发布0.4.2尚不包含本次适配及标准目录改造。
 - **其他未适配版本使用过程中可能出现运行错误。** 安装接入检查通过不代表运行期功能兼容；请更新到对应 Release 标注的适配酒馆版本，或自行适配本插件后使用。版本标注是兼容说明，不新增作者SHA、签名或纯净源码准入。
 
 - macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron、原生 Windows CLI）。要求 DSH / boot 0.1.5-rc.2、Node.js 22.19+（建议 24，维护核 SQLite / zstd / VM 能力）。未知作者源码布局或未知管理器明确拒绝，不猜测覆盖；作者版本号只作**诊断定位**。

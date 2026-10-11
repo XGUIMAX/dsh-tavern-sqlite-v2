@@ -66,7 +66,7 @@ export function apply(ctx) {
   disposers.push(commands.register({
     name: 'tavern-save',
     description: '数据库会话存档状态；原档请使用只读面板，另存必须显式原生分叉',
-    input: { hint: 'status | migrate [chat-<档 id>]' },
+    input: { hint: 'status' },
     handler: async invocation => {
       try {
         assertLegacySessionWritable(sessionIdOf(invocation))

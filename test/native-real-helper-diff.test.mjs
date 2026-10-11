@@ -11,11 +11,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 // 作者部分 domain 模块传递性 import 'jsdom'：用桩加载器在**不安装任何包**的前提下真实 import 作者模块。
 register('./support/author-jsdom-stub-loader.mjs', import.meta.url)
 import { createSessionWindowProjector, createActivitySummaryBridge } from '../lib/session-window-projector.js'
+import {viewAssemblerSource} from '../deploy/view-assembler-source.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const AUTHOR_LIB = path.resolve(HERE, '..', '..', '..', 'tmp', 'release-034-20261008', 'author-fixture', 'src',
   'dsh-tavern-68215e47516637e00c75d2b4bba3192679559425', 'tavern-plugin', 'lib')
 const AUTHOR_INDEX = path.join(AUTHOR_LIB, 'index.js')
+const {assembleTavernView}=await import('data:text/javascript;base64,'+Buffer.from(viewAssemblerSource(fs.readFileSync(AUTHOR_INDEX,'utf8')),'utf8').toString('base64'))
 const domain = name => import(pathToFileURL(path.join(AUTHOR_LIB, 'domain', name)).href)
 
 function sliceClosureFunction(source, header, endMarker = '\n  }\n') {
@@ -79,6 +81,7 @@ test('S2真实业务Helper/MVU/regex差分', async () => {
       evidence: () => ({ evidence: 'fixture' })
     })
     const deps = {
+      assembleTavernView,
       str: value => (value === undefined || value === null ? '' : String(value)),
       readTavernSettings: async () => ({ trustedCardMode: false, frameSizing: 'fill' }),
       readScript: async () => undefined,

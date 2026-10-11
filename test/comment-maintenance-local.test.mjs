@@ -54,17 +54,36 @@ test('现场CLI1 无记录变量修改真实装卸', async t => {
   const edited = f.source.text(OUTSIDE) + '\nconst userVar = 7\n' // 无记录的块外用户改动
   fs.writeFileSync(f.source.file(OUTSIDE), edited, 'utf8')
   assert.equal(f.source.readRecord(), null, '前置：首装前不应有记录')
-  // 两式各一轮：每轮都**先真装**再破坏记录 —— 证的是"按现场完整块还原 + 块外改动保留"，不是只清记录
+  // 证的是"按现场完整块还原 + 块外改动保留"，不是只清记录：真装**只做一次**并快照装后现场；
+  // 两种坏记录各自独立真卸载——首种直接用装后现场，第二种先 restore 回装后现场（不重跑 install）。
+  const bareEdited = f.source.capture() // 装前现场（含块外改动、无记录）
+  const startedInstall = Date.now()
+  const on = await run('install', shellDriver().driver, f.source, f.evidence)
+  const installMs = Date.now() - startedInstall
+  assert.equal(on.changed, true, '真实施缝必须产生变更')
+  assert.ok(f.source.readRecord() !== null, '真实施缝必须落记录')
+  const installed = f.source.capture() // 装后现场（base64/null 脱离快照）
+  assert.equal(sameImage(installed, bareEdited), false, '装后现场必须与装前不同，否则快照与断言都无意义')
+  let uninstalls = 0
+  const startedUninstall = Date.now()
   for (const broken of ['{broken\n', 'null\n']) {
-    const on = await run('install', shellDriver().driver, f.source, f.evidence)
-    assert.equal(on.changed, true, '真实施缝必须产生变更：' + broken.trim())
-    assert.ok(f.source.readRecord() !== null, '真实施缝必须落记录：' + broken.trim())
+    if (uninstalls > 0) {
+      // 第二种坏记录：从**独立相同初态**开始——恢复装后现场并回读确认，不重跑 install
+      f.source.restore(installed)
+      f.source.assertImage(installed, { installation: true })
+    }
     fs.writeFileSync(f.source.file(STANDARD_RECORD), broken, 'utf8')
+    assert.equal(f.source.readRecord(), null, '坏记录必须被判为无记录：' + broken.trim())
     const off = await run('uninstall', shellDriver().driver, f.source, f.evidence)
+    uninstalls += 1
     assert.equal(off.changed, true, '坏记录不得阻断按现场块卸载：' + broken.trim())
     assert.equal(f.source.blockPresence().length, 0, '卸载后不得残留本 owner 块：' + broken.trim())
     assert.equal(f.source.text(OUTSIDE), edited, '块外用户改动必须逐字节保留：' + broken.trim())
+    // 全目标＋记录/owned 都必须回到**装前**现场，不只是 index
+    assert.ok(sameImage(f.source.capture(), bareEdited), '卸载后所有有限目标＋记录/owned 必须逐字节回到装前现场：' + broken.trim())
   }
+  assert.equal(uninstalls, 2, '两种坏记录必须各做一次独立真卸载')
+  t.diagnostic('CLI1：install=1 uninstall=' + uninstalls + ' installMs=' + installMs + ' 卸载与夹具复位Ms=' + (Date.now() - startedUninstall))
 })
 
 test('现场CLI2 上游覆盖部分区块清残留保留新源码', async t => {

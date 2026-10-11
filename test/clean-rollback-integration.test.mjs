@@ -85,6 +85,39 @@ async function fixture(failed=false,withBook=false){
  const args={chat:await read(),requestedTurn:failed?null:53,availability:()=>({failedTurns:failed?[53]:[],canRollback:!failed}),readChat:read,updateChat:update,chats:{rollbackArchivePath:store.rollbackArchivePath,readRollbackWorldbook:store.readRollbackWorldbook,readSlice:store.readSlice,update},sessions:{get:id=>agents.get(id),getSession:id=>agents.get(id)?.session,flush:async()=>{}},persistence,services,quiesce:async()=>{},sideCleanup:async(chat,turn)=>{await recalls.pruneRollback(chat,turn,chat.timeline.branchId)}, view:async chat=>{assert.equal(rollbackBarrier.has(chat.sessionId),true,'构造返回视图期间仍阻止新写，完整基线发布后才解除');return {turn:chat.messages.at(-1).turn,variables:chat.variables}},readCard:async()=>({})}
  return {root,base,keep,session,background,syncFrames,mainDb,workerDb,store,agents,args,read,update,handles,recalls,globals,setFault:value=>{fault=value},cleanup:async()=>{for(const id of agents.keys())rollbackBarrier.delete(id);await globals.dispose();recalls.dispose();store.dispose();mainDb.close();workerDb.close();await ctx.fiber.dispose();rmSync(root,{recursive:true,force:true})}}
 }
+test('PR13真实SQLite：基准后台null采用同Session记录切点删尽尾并同连接同步',async()=>{
+ const f=await fixture(true)
+ try{
+  const id=f.background.id
+  await f.update(f.base.id,current=>{
+   current.timeline.operations.body.businessBefore.participants={settlement:{role:'settlement',sessionId:id,lifetime:'chat',boundary:null,status:'current'}}
+   current.rollbackSessionCuts={'53':{[id]:0}}
+   return current
+  })
+  const result=await cleanRollback({...f.args,chat:await f.read()})
+  assert.equal(result.turn,52)
+  assert.equal(f.workerDb.cursor(),1,'SQLite只留后台种子，失败产物物理删尽')
+  assert.equal(f.background.log.length,1)
+  assert.equal(f.mainDb.cursor(),f.keep)
+  assert.equal((await f.read()).timeline.operations.body,undefined)
+  assert.equal(f.syncFrames.length,1)
+ }finally{await f.cleanup()}
+})
+test('PR13真实SQLite：只有后置后台水位时前后台零删且账本不变',async()=>{
+ const f=await fixture(true)
+ try{
+  await f.update(f.base.id,current=>{
+   current.timeline.operations.body.businessBefore.participants={settlement:{role:'settlement',sessionId:f.background.id,lifetime:'chat',boundary:null,status:'current'}}
+   return current
+  })
+  const before=await f.read(),mainCursor=f.mainDb.cursor(),backgroundCursor=f.workerDb.cursor()
+  await assert.rejects(cleanRollback({...f.args,chat:before}),/上一轮后台缺少权威seq边界/)
+  assert.equal(f.mainDb.cursor(),mainCursor)
+  assert.equal(f.workerDb.cursor(),backgroundCursor)
+  assert.deepEqual(await f.read(),before)
+  assert.equal(f.syncFrames.length,0)
+ }finally{await f.cleanup()}
+})
 for(const failed of [false,true])test((failed?'失败':'正常')+'正文的书历史引用在真实Session纯尾回退恢复52并回收独占版本',async()=>{
  const f=await fixture(failed,true)
  try{
@@ -105,6 +138,13 @@ for(const failure of ['view','publish'])test('SQL已完成但'+failure+'失败�
   await assert.rejects(cleanRollback(args),new RegExp(failure+' failed'))
   const latest=await f.read();assert.equal(latest.rollbackPending,undefined);assert.equal(latest.messages.at(-1).turn,52)
   assert.equal(f.syncFrames.length,0);assert.equal(rollbackBarrier.has(f.session.id),false);assert.equal(rollbackBarrier.has(f.background.id),false);assert.equal(rollbackSchedulingBarrier.has(f.session.id),false)
+  const completion=latest.rollbackCompletion,revision=latest._storageRevision,main=f.mainDb.cursor(),worker=f.workerDb.cursor()
+  assert.ok(completion,'view/publish失败后必须保留已完成目标身份')
+  const recovered=await cleanRollback({...f.args,chat:latest,requestedTurn:completion.ordinaryTarget,sideCleanup:async()=>{throw Error('完成重试不得重复副清理')}})
+  assert.equal(recovered.rolledBack.sync.id,completion.id);assert.equal(recovered.rolledBack.sync.revision,revision)
+  assert.equal(f.syncFrames.length,1,'原失败未发布，补发必须恰一次')
+  assert.equal((await f.read())._storageRevision,revision,'完成重试不能再次写SQL')
+  assert.equal(f.mainDb.cursor(),main);assert.equal(f.workerDb.cursor(),worker)
  }finally{await f.cleanup()}
 })
 for(const failed of [false,true,'row-v1'])test((failed==='row-v1'?'更新前row-v1生成，更新后':failed?'失败':'正常')+'53统一删尾，DB正文变量与Agent恢复52，实际turn()重发53',async()=>{
@@ -297,5 +337,131 @@ test('跨库故障保留无业务负载的完成意图并拒绝新写，重试�
   rollbackBarrier.clear() // 模拟进程屏障消失，SQLite meta仍必须挡住新写。
   assert.throws(()=>f.mainDb.appendBatch([{type:'turn/start',seq:f.keep,time:Date.now(),data:{turn:53}}],f.keep),/回退未完成/)
   f.setFault(false);await cleanRollback({...f.args,chat:partial});const done=await f.read();assert.equal(done.rollbackPending,undefined);assert.equal(f.mainDb.readMeta().eventCount,f.keep);assert.ok(!JSON.stringify(f.workerDb.readAll()).includes('旧53'));assert.equal(f.agents.get(f.session.id).phase.lastTurn,52)
+ }finally{await f.cleanup()}
+})
+// 普通回退完成记录（R2）：完成时持久 rollbackCompletion，同目标 retry 只重新发布完成帧。
+function archiveRows(root,chatId,table,since=0){
+ const db=new DatabaseSync(path.join(root,'chats',chatId,'archive.db'))
+ try{return db.prepare('SELECT count(*) n FROM '+table+' WHERE message_index >= ?').get(since).n}finally{db.close()}
+}
+function once(input,message){let fired=false;return async(...args)=>{if(!fired){fired=true;throw Error(message)}return input(...args)}}
+test('普通回退完成记录：rollbackCompletion落version/id/turn/cuts/revision/branchId/ordinaryTarget，完成帧同id同rev',async()=>{
+ const f=await fixture()
+ try{
+  const result=await cleanRollback(f.args),after=await f.read()
+  assert.equal(result.turn,52,'普通目标仍回退到52')
+  const completion=after.rollbackCompletion
+  assert.ok(completion,'完成记录必须持久在chat上')
+  assert.equal(completion.version,1)
+  assert.ok(typeof completion.id==='string' && completion.id!=='')
+  assert.equal(completion.turn,53)
+  assert.deepEqual(completion.cuts.map(cut=>cut.sessionId).sort(),[f.session.id,f.background.id].sort())
+  assert.equal(completion.revision,after._storageRevision,'revision必须是完成时的SQL版本')
+  assert.equal(completion.branchId,after.timeline.branchId)
+  assert.ok(completion.ordinaryTarget && typeof completion.ordinaryTarget==='object','普通回退必须留发起凭据')
+  assert.equal(completion.failureTarget,undefined,'普通回退无失败目标')
+  assert.equal(after.rollbackPending,undefined,'完成记录与半提交意图互斥')
+  assert.equal(f.syncFrames.length,1)
+  assert.equal(result.rolledBack.sync.id,completion.id,'完成帧id必须等于完成记录id')
+  assert.equal(result.rolledBack.sync.revision,completion.revision)
+  assert.equal(f.syncFrames[0].value.id,completion.id)
+  assert.equal(f.syncFrames[0].value.revision,completion.revision)
+  assert.deepEqual(f.syncFrames[0].value.sessions.map(row=>row.sessionId).sort(),[f.session.id,f.background.id].sort())
+ }finally{await f.cleanup()}
+})
+test('同目标retry：原凭据重发完成帧同id同rev，零truncate/零sideCleanup/零SQL写',async()=>{
+ const f=await fixture()
+ try{
+  const first=await cleanRollback(f.args),after=await f.read()
+  const completion=after.rollbackCompletion,creditTarget=completion.ordinaryTarget
+  assert.ok(creditTarget,'完成记录必须留原普通目标')
+  assert.equal(first.turn,52)
+  let sideCleanups=0
+  const framesBefore=f.syncFrames.length,revisionBefore=after._storageRevision,cursorBefore=f.mainDb.cursor(),workerBefore=f.workerDb.cursor(),archiveBefore=archiveRows(f.root,f.base.id,'archive_messages',2),metaBefore=f.mainDb.readMeta().eventCount
+  const retried=await cleanRollback({...f.args,chat:await f.read(),requestedTurn:creditTarget,sideCleanup:async(chat,turn)=>{sideCleanups+=1;await f.recalls.pruneRollback(chat,turn,chat.timeline.branchId)}})
+  const second=await f.read()
+  assert.equal(sideCleanups,0,'retry不得再跑sideCleanup')
+  assert.equal(f.syncFrames.length,framesBefore+1,'retry必须重新publish一次完成帧')
+  assert.equal(f.syncFrames.at(-1).value.id,completion.id,'retry帧必须是同一完成id')
+  assert.equal(f.syncFrames.at(-1).value.revision,completion.revision)
+  assert.equal(retried.rolledBack.sync.id,completion.id)
+  assert.equal(retried.rolledBack.sync.revision,completion.revision)
+  assert.equal(second._storageRevision,revisionBefore,'retry不得写SQL')
+  assert.equal(f.mainDb.cursor(),cursorBefore,'retry不得truncate原生事件')
+  assert.equal(f.mainDb.readMeta().eventCount,metaBefore)
+  assert.equal(f.workerDb.cursor(),workerBefore)
+  assert.equal(archiveRows(f.root,f.base.id,'archive_messages',2),archiveBefore,'retry不得再删archive正文')
+  assert.deepEqual(second.messages,after.messages)
+  assert.equal(second.rollbackCompletion.id,completion.id,'完成记录必须保留供再次retry')
+ }finally{await f.cleanup()}
+})
+test('兼容数字retry：旧普通回退以turn 53重发同样幂等，零删零写',async()=>{
+ const f=await fixture()
+ try{
+  await cleanRollback(f.args)
+  const after=await f.read(),completion=after.rollbackCompletion
+  const framesBefore=f.syncFrames.length,cursorBefore=f.mainDb.cursor(),revisionBefore=after._storageRevision
+  const retried=await cleanRollback({...f.args,chat:await f.read(),requestedTurn:53})
+  assert.equal(f.syncFrames.length,framesBefore+1)
+  assert.equal(f.syncFrames.at(-1).value.id,completion.id,'数字目标必须收敛到同一完成记录')
+  assert.equal(retried.rolledBack.sync.id,completion.id)
+  assert.equal((await f.read())._storageRevision,revisionBefore)
+  assert.equal(f.mainDb.cursor(),cursorBefore)
+ }finally{await f.cleanup()}
+})
+test('readCard分支：完成期间readCard抛错则响亮失败且释放屏障，同目标retry收敛同id',async()=>{
+ const f=await fixture()
+ try{
+  await assert.rejects(cleanRollback({...f.args,readCard:once(async()=>({}),'readCard故障点')}),/readCard故障点/)
+  assert.equal(rollbackSchedulingBarrier.has(f.session.id),false,'readCard失败不得永久占屏障')
+  const pending=await f.read()
+  assert.ok(pending.rollbackCompletion,'readCard失败后完成记录必须保留供同目标retry')
+  assert.equal(pending.rollbackCompletion.revision,pending._storageRevision)
+  assert.equal(f.mainDb.cursor(),f.keep,'SQL已提交的完成不得回滚原生事件')
+  let sawCard
+  const retried=await cleanRollback({...f.args,chat:await f.read(),requestedTurn:pending.rollbackCompletion.ordinaryTarget,readCard:async()=>{sawCard={title:'卡片'};return sawCard}})
+  assert.equal(sawCard.title,'卡片','成功retry必须用当前readCard构造视图')
+  assert.equal(retried.rolledBack.sync.id,pending.rollbackCompletion.id,'retry必须publish同id')
+  const done=await f.read()
+  assert.equal(done.rollbackCompletion.id,pending.rollbackCompletion.id)
+  assert.equal(done._storageRevision,pending._storageRevision,'retry不得写SQL')
+ }finally{await f.cleanup()}
+})
+test('普通目标身份安全：错branch/错rev/异档/写后过期全拒且零删零写',async()=>{
+ const f=await fixture()
+ try{
+  await cleanRollback(f.args)
+  const after=await f.read(),completion=after.rollbackCompletion,credit=completion.ordinaryTarget
+  const revision=after._storageRevision,cursor=f.mainDb.cursor(),workerCursor=f.workerDb.cursor(),archiveCount=archiveRows(f.root,f.base.id,'archive_messages',2)
+  const assertIntact=async()=>{const now=await f.read();assert.equal(now._storageRevision,revision,'拒绝路径不得写业务');assert.equal(f.mainDb.cursor(),cursor);assert.equal(f.workerDb.cursor(),workerCursor);assert.equal(archiveRows(f.root,f.base.id,'archive_messages',2),archiveCount)}
+  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),requestedTurn:{...credit,chatId:'other-chat'}}),/不一致/)
+  await assertIntact()
+  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),requestedTurn:{...credit,sessionId:'other-session'}}),/不一致/)
+  await assertIntact()
+  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),requestedTurn:{...credit,branchId:'other-branch'}}),/版本已过期|分支|revision|不一致/)
+  await assertIntact()
+  await assert.rejects(cleanRollback({...f.args,chat:await f.read(),requestedTurn:{...credit,revision:revision+1}}),/revision|版本|不一致/)
+  await assertIntact()
+  // 更晚的新普通目标（真实 Session/DB 写入：物理删过的轮号可被新输入复用）允许发起新回退；此后旧目标必须在任何新revision后拒。
+  const bgKeep=f.background.seq
+  f.background.append('turn/start',{turn:2});f.background.append('user/message',{id:'u2',role:'user',content:[{type:'text',text:'后台2'}],source:{kind:'user'}},{surfaceOp:'append'});f.background.append('turn/end',{turn:2,reason:{kind:'completed'}})
+  f.workerDb.appendBatch(f.background.snapshotEvents(bgKeep),bgKeep)
+  const sessKeep=f.session.seq
+  f.session.append('turn/start',{turn:53});f.session.append('user/message',{id:'u53b',role:'user',content:[{type:'text',text:'输入53新一轮'}],source:{kind:'user'}},{surfaceOp:'append'});f.session.append('assistant/message',{turn:53,step:1,message:{id:'a53b',role:'assistant',content:[{type:'text',text:'新53'}],source:{kind:'model',provider:'fixture',model:'fixture'}},stream:[]},{surfaceOp:'append'});f.session.append('turn/end',{turn:53,reason:{kind:'completed'}})
+  f.mainDb.appendBatch(f.session.snapshotEvents(sessKeep),sessKeep)
+  const after2=await f.read(),baseline2=captureRollbackBusinessState(after2)
+  await f.update(f.base.id,chat=>{chat.messages=[...chat.messages,{role:'user',turn:53,text:'输入53新一轮'},{role:'assistant',turn:53,text:'新53',swipeId:0,swipes:['新53']}];chat.variables={hp:53};chat.timeline={...chat.timeline,revision:53,operations:{body:{kind:'body',turn:53,status:'completed',businessBefore:baseline2}},checkpoints:[{id:'cp53b',turn:53,businessBefore:baseline2}],participants:{settlement:{role:'settlement',sessionId:f.background.id,lifetime:'chat',boundary:f.background.seq-1}}};return chat},{source:'fixture.turn53-new'})
+  const newer=await f.read()
+  const newTarget={kind:'rollback',turn:53,branchId:newer.timeline.branchId,revision:newer._storageRevision,chatId:newer.id,sessionId:newer.sessionId}
+  const second=await cleanRollback({...f.args,chat:newer,requestedTurn:newTarget,availability:()=>({failedTurns:[],canRollback:true})})
+  const done=await f.read()
+  assert.equal(second.turn,52,'新普通目标必须允许发起新的完成（本轮=53，回退到52之前）')
+  assert.notEqual(done.rollbackCompletion.id,completion.id)
+  const staleRevision=done._storageRevision,staleCursor=f.mainDb.cursor(),staleArchive=archiveRows(f.root,f.base.id,'archive_messages',2)
+  await assert.rejects(cleanRollback({...f.args,chat:done,requestedTurn:credit}),/revision|版本|过期|不一致/)
+  const final=await f.read()
+  assert.equal(final._storageRevision,staleRevision,'过期目标不得写业务')
+  assert.equal(f.mainDb.cursor(),staleCursor)
+  assert.equal(archiveRows(f.root,f.base.id,'archive_messages',2),staleArchive)
  }finally{await f.cleanup()}
 })

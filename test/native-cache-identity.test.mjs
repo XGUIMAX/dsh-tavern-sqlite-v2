@@ -1,6 +1,7 @@
 // S2 debug 稳定片段缓存：跨身份隔离 + 界限缓存（**只写不跑**）。
 // scope：本文件只验证「缓存键/出借语义」，依赖为受控实现（非真实 helper 语义）；真实 helper 整 view 差分见 native-real-helper-diff.test.mjs。
 import test from 'node:test'
+import {assembleTavernView} from './support/author-view-assembler.mjs'
 import assert from 'node:assert/strict'
 import { createSessionWindowProjector, REQUIRED_FUNCTIONS, REQUIRED_VALUES } from '../lib/session-window-projector.js'
 
@@ -13,6 +14,7 @@ function buildDeps(fixture) {
   }
   for (const name of REQUIRED_VALUES) deps[name] = name === 'helperMessageColdWindow' ? 24 : { fixture: true }
   Object.assign(deps, {
+    assembleTavernView,
     str: value => (value === undefined || value === null ? '' : String(value)),
     activityOf: () => fixture.activity,
     activityBridge: { set() {}, get() { return undefined } },

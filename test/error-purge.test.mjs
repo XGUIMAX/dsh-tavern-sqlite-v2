@@ -118,23 +118,22 @@ test('干净清理3 play-controls：onPurge附参+菜单同参+幂等',()=>{
   assert.ok(next.includes('当前没有可安全清理的失败目标'))
   assert.ok(!next.includes('expectedTurn: clearIncomplete ? null : targetTurn'))
   assert.ok(!next.includes('setFailedErrorVisibility", { sessionId: props.sessionId, turn: turn, hidden: hidden'))
-  // built/inline 布局（本夹具没有作者 wait 行）：追加 clearIncomplete 专用 wait+refresh；旧软视图行只包菜单内一处；不 double wait
+  // 菜单 clear-only 已委托共享服务（D07）：不再内联 targetCompare / clear-only wait / 收据守卫；身份与等待都在共享服务内
+  assert.equal(next.split('// [dsh-tavern-error-purge-menu-delegated:v1]').length - 1, 1, '菜单共享委托标记恰一处')
+  assert.ok(next.includes('menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget)'), '菜单 clear 分支必须委托共享服务')
+  assert.ok(next.includes('if (!menuStorageUi || typeof menuStorageUi.cleanFailure !== "function") throw new Error("精简清理未接线：找不到共享 tavernStorageUi.cleanFailure，拒绝清理");'), '缺共享服务必须响亮失败')
+  assert.equal(next.split('var targetCompare = function (ft, cft) {').length - 1, 0, '菜单不再内联身份算法')
+  assert.equal(next.split('targetCompare(').length - 1, 0, '菜单不再内联身份调用')
+  assert.equal(next.split('cleanedFailureTarget').length - 1, 1, '菜单收据核对已内聚共享服务；仅面板/共享侧保留')
+  assert.equal(next.split('alreadyClean').length - 1, 1, '菜单不再自造 alreadyClean 分支')
+  assert.equal(next.split('await props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);').length - 1, 0, '菜单不得再自造 clear-only wait（等待在共享服务内）')
   assert.equal(next.split('waitForTavernRollbackSync(result?.view?.rolledBack?.sync)').length - 1, 0, '本布局不得出现作者 wait 文本')
-  assert.equal(next.split('await props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);').length - 1, 1, 'clearIncomplete 专用 wait 恰一处（不 double wait）')
-  assert.ok(next.includes('if (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) {'), 'alreadyClean 不等待')
-  assert.equal(next.split('if (!clearIncomplete) historyProjection.rolledBack(props.sessionId, result && result.view);').length - 1, 1, '只包菜单内那一处软视图行（同文件另两处不动）')
-  assert.equal(next.split('var targetCompare = function (ft, cft) {').length - 1, 1, '面板身份算法已拆到共享服务：只剩菜单侧内联一处')
-  assert.equal(next.split('targetCompare(').length - 1, 1, '调用只剩菜单回执核对一处（面板 old-ft/回执核对在共享服务内）')
+  assert.ok(next.includes('if (clearIncomplete) {') && next.includes('return result;'), '菜单 clear 成功分支只 close 并 early return（不再重投影/等待）')
+  assert.ok(next.includes('if (!clearIncomplete) { liveTavernView.invalidate(props.sessionId); tavernCoordination.invalidate(props.sessionId); }'), '刷新只在普通回退分支执行（clear 已由共享服务 refresh）')
+  assert.ok(next.includes('storageUi: function () { return ctx.get("tavernStorageUi") }'), '注册语句必须给 TavernRollbackAction 注入 storageUi')
   assert.ok(next.includes('storageUi.cleanFailure(props.sessionId, turn, failureTarget || liveTarget)'), '面板 onPurge 必须委托共享服务')
-  // 本布局（built/inline）的 clear-only guard 与回执必需：缺 sync / 缺回执都必须响亮失败，不静默越过
-  assert.equal(next.split('if (clearIncomplete && typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行清理");').length - 1, 1, 'built/inline 需 clear-only sync guard（RPC 前）')
-  assert.ok(next.includes("if (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.cleanedFailureTarget)) throw new Error('清理未确认目标失败轮，不更新本地状态');"), '清理场景缺回执必须 throw')
-  assert.ok(next.includes('if (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) {'), 'clear-only wait 块以 alreadyClean 排除（normal 不动）')
-  assert.ok(next.includes('await props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);'), '正常等待一律 await（无 typeof 跳过）')
-  assert.ok(!next.includes('typeof props.sessions?.waitForTavernRollbackSync === "function") await'), '禁止 if(typeof) 跳过等待')
-  assert.equal(next.includes('清理目标已过期（与当前视图不一致）'), false, 'old-ft 过期核对已内聚共享服务：面板不得再内联身份核对文字')
-  assert.ok(next.includes('storageUi.cleanFailure(props.sessionId, turn, failureTarget || liveTarget)'), '面板必须以共享服务委托替代内联算法')
-  assert.ok(next.includes('eventCount !== ft.endSeq + 1') && next.includes('native 不得带 operationId'), 'native 形状：eventCount=endSeq+1 且 operationId undefined')
+  assert.ok(next.includes('menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget)'), '菜单形状：委托共享服务并按真实目标轮号发起')
+  assert.equal(next.includes('eventCount !== ft.endSeq + 1'), false, '身份/native 形状已内聚共享服务：注入模板不得再内联')
 })
 test('干净清理4 play-controls：未知锚点fail-closed',()=>{
   assert.throws(()=>applyErrorPurgePlayControlsTransform('// 空源'), /锚点/)
@@ -234,20 +233,23 @@ test('干净清理7 built组合：clientCoreWrites built含failureTarget/handler
     assert.equal(built.split('if (clearIncomplete && typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行清理");').length - 1, 0, 'built 不重复插 clear-only guard')
     assert.equal(built.split('回退已落盘，但宿主缺少同连接同步消费者；请重开页面').length - 1, 1, '作者 NEXT 自带同步消费者 guard（不重复）')
     // 护栏：wait 之后必须定向 rebase+失效（作者真接口 invalidate，服务级 refresh 不存在）；清理场景缺回执必须 throw；正常等待不得 typeof 跳过
-    assert.equal(built.split('alreadyClean === true)) await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync); if (clearIncomplete && result && result.view && result.view.rolledBack) { liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId); }').length - 1, 1, 'wait 后必须定向 rebase+失效（下一目标立刻重算）')
-    assert.equal(built.split("if (clearIncomplete && !(result && result.view && result.view.rolledBack && result.view.rolledBack.cleanedFailureTarget)) throw new Error('清理未确认目标失败轮，不更新本地状态');").length - 1, 1, '清理场景缺回执必须 throw')
+    assert.equal(built.split('alreadyClean === true)) await props.sessions.waitForTavernRollbackSync(result?.view?.rolledBack?.sync); if (clearIncomplete && result && result.view && result.view.rolledBack) { liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId); }').length - 1, 0, 'clear 分支已移交共享服务：不得再自造 wait→rebase')
+    assert.equal(built.split('// [dsh-tavern-error-purge-menu-delegated:v1]').length - 1, 1, 'built 产物的菜单必须是共享委托形态（恰一处标记）')
+    assert.ok(built.includes('menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget)'), 'built 菜单 clear 分支必须委托共享服务')
+    assert.ok(built.includes('if (!menuStorageUi || typeof menuStorageUi.cleanFailure !== "function") throw new Error("精简清理未接线：找不到共享 tavernStorageUi.cleanFailure，拒绝清理");'), 'built 缺共享服务必须响亮失败（不静默）')
     assert.ok(!built.includes('typeof props.sessions?.waitForTavernRollbackSync === "function") await'), 'built 禁止 if(typeof) 跳过等待')
-    assert.equal(built.split('var targetCompare = function (ft, cft) {').length - 1, 1, '面板算法已拆共享服务：只剩菜单侧一处')
-    assert.equal(built.split('targetCompare(').length - 1, 1, 'built 布局：调用只剩菜单 1 处')
+    assert.equal(built.split('var targetCompare = function (ft, cft) {').length - 1, 0, '菜单不再内联身份算法（已委托共享服务）')
+    assert.equal(built.split('targetCompare(').length - 1, 0, 'built 布局：菜单不再内联身份调用')
     // split 布局：作者 wait 在位 ⇒ 只改条件 + 定向重投影，不追加 clear 专用 wait / clear-only guard（不 double wait、不双 guard）
     const splitFeature = writes.get('tavern-plugin/src/client/features/play-controls.js')
     assert.ok(splitFeature, 'split 布局必须产出 features/play-controls.js')
     assert.equal(splitFeature.split('waitForTavernRollbackSync(result?.view?.rolledBack?.sync);').length - 1, 1, 'split 布局沿用作者 wait')
     assert.equal(splitFeature.split('await props.sessions.waitForTavernRollbackSync(result && result.view && result.view.rolledBack && result.view.rolledBack.sync);').length - 1, 0, 'split 布局不得追加 clear 专用 wait')
     assert.equal(splitFeature.split('if (clearIncomplete && typeof props.sessions?.waitForTavernRollbackSync !== "function") throw new Error("回退同步尚未接线或尚未就绪，未执行清理");').length - 1, 0, 'split 布局作者 guard 已在位：不得重复插 clear-only guard')
-    assert.equal(splitFeature.split('targetCompare(').length - 1, 1, 'split 布局调用只剩菜单 1 处（面板走共享服务）')
-    assert.ok(splitFeature.includes('if (!(result && result.view && result.view.rolledBack && result.view.rolledBack.alreadyClean === true)) await props.sessions.waitForTavernRollbackSync'))
-    assert.ok(splitFeature.includes('if (clearIncomplete && result && result.view && result.view.rolledBack) { liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId); }'), 'split 布局：wait 后 clearIncomplete 才定向 rebase+失效')
+    assert.equal(splitFeature.split('targetCompare(').length - 1, 0, 'split 布局：菜单不再内联身份调用（面板与菜单都走共享服务）')
+    assert.equal(splitFeature.split('// [dsh-tavern-error-purge-menu-delegated:v1]').length - 1, 1, 'split 布局菜单必须是共享委托形态（恰一处标记）')
+    assert.ok(splitFeature.includes('menuStorageUi.cleanFailure(props.sessionId, Number(menuFailureTarget.turn), menuFailureTarget)'), 'split 布局菜单 clear 分支必须委托共享服务')
+    assert.equal(splitFeature.includes('alreadyClean === true)) await props.sessions.waitForTavernRollbackSync'), false, 'split 布局菜单不得再自造 clear-only wait（等待在共享服务内）')
     assert.equal(splitFeature.split('回退同步尚未接线或尚未就绪，未执行回退').length - 1, 1, 'split 布局作者 guard 在 RPC 前恰 1')
     const tmp = path.join(base, 'check-built.mjs')
     writeFs(tmp, built)
@@ -625,6 +627,7 @@ test('干净清理13 目标身份键含 kind/endSeq/eventCount：native 身份�
 // 旧 DOM 兜底载体（data-tavern-failure-cleanup / dsh-tavern-failure-fallback / syncFailureRow）已整体退役：
 // 失败提示改由自有 Slot（conversation.input.dock）承载；43→42→null 连续目标与严格回执拒绝由
 // upstream-ui-migration.test.mjs 的「自有UI：连续失败目标与严格回执拒绝」承接。
+// 菜单 clear-only 真回调：经真实共享服务（loadSharedStorageUi 的真 tavernStorageUi）验证委托后的等待/刷新/拒收语义。
 test('干净清理14 失败提示已迁自有Slot，作者控件不再补造DOM行', async ()=>{
   const turnControls = applyErrorPurgeTurnControlsTransform(readFileSync(new URL(FIX + 'turn-error-controls.js', import.meta.url), 'utf8'))
   assert.doesNotMatch(turnControls, /dsh-tavern-failure-fallback|data-tavern-failure-cleanup|function syncFailureRow/)
@@ -851,22 +854,21 @@ test('干净清理18 真协调服务：清理回执后定向失效并刷新下�
     const PAIRED_NEW = /liveTavernView\.rebase\(props\.sessionId\);(\s*)tavernCoordination\.invalidate\(props\.sessionId\);/g
     const PAIRED_OLD = /liveTavernView\.rebase\(props\.sessionId\);(\s*)tavernCoordination\.refresh\(props\.sessionId\);/g
     const countPairs = (text, pattern) => (text.match(pattern) || []).length
-    assert.equal(countPairs(built, PAIRED_NEW), 2, '真产物必须恰有 2 处 paired rebase+invalidate（面板侧已拆共享服务）')
+    assert.equal(countPairs(built, PAIRED_NEW), 1, '菜单与面板均已委托共享服务，真产物只保留普通回退catch配对')
     assert.equal(countPairs(built, PAIRED_OLD), 0, '真产物不得残留 paired 旧 refresh')
     let flipped = 0
     const legacyProduct = built.replace(PAIRED_NEW, (_all, whitespace) => { flipped += 1; return 'liveTavernView.rebase(props.sessionId);' + whitespace + 'tavernCoordination.refresh(props.sessionId);' })
-    assert.equal(flipped, 2, 'legacy 构造必须恰好翻回 2 处 paired（实际 ' + flipped + '）')
-    assert.equal(countPairs(legacyProduct, PAIRED_OLD), 2, 'legacy 必须＝2 处旧 paired')
+    assert.equal(flipped, 1, 'legacy构造必须实际翻回唯一普通回退catch配对')
+    assert.equal(countPairs(legacyProduct, PAIRED_OLD), 1, 'legacy必须含唯一旧catch配对')
     assert.equal(countPairs(legacyProduct, PAIRED_NEW), 0, 'legacy 不得残留新 paired')
-    assert.equal(legacyProduct.split('tavernCoordination.invalidate(').length - 1, built.split('tavernCoordination.invalidate(').length - 1 - 2, 'legacy 只少 4 处 paired invalidate（作者其它 5 处不动）')
+    assert.equal(legacyProduct.split('tavernCoordination.invalidate(').length - 1, built.split('tavernCoordination.invalidate(').length - 1 - 1, 'legacy仅少本次被替换的catch配对，作者其他调用原样保留')
     const migrated = applyErrorPurgePlayControlsTransform(legacyProduct)
     assert.equal(countPairs(migrated, PAIRED_OLD), 0, '迁移后不得残留旧 paired refresh')
-    assert.equal(countPairs(migrated, PAIRED_NEW), 2, '迁移后必须恢复 2 处 paired invalidate')
+    assert.equal(countPairs(migrated, PAIRED_NEW), 1, '迁移后恢复唯一catch配对')
     assert.equal(migrated, built, '迁移后必须与真产物逐字一致（strict same product）')
     assert.equal(applyErrorPurgePlayControlsTransform(migrated), migrated, '再 apply 必须幂等')
-    let mixedSeen = 0
-    const mixed = legacyProduct.replace(PAIRED_OLD, (_all, whitespace) => { mixedSeen += 1; return mixedSeen <= 1 ? 'liveTavernView.rebase(props.sessionId);' + whitespace + 'tavernCoordination.invalidate(props.sessionId);' : _all })
-    assert.equal(mixedSeen, 2, '混合输入必须命中 2 处旧 paired')
+    const mixed = legacyProduct + '\nfunction foreignRefresh() { liveTavernView.rebase(props.sessionId); tavernCoordination.invalidate(props.sessionId); }\n'
+    // 唯一本插件旧配对加外来新配对；仍须拒绝归属不明确，不能降低负例。
     assert.equal(countPairs(mixed, PAIRED_NEW), 1, '混合输入＝1 new + 1 old')
     assert.equal(countPairs(mixed, PAIRED_OLD), 1, '混合输入＝1 old（归属不明确）')
     let mixedError = null

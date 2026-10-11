@@ -13,6 +13,7 @@
 //   ⑤ queryFailureCleanup：真 node:sqlite 临时库五场景（基准在位／缺基准／检查点／正文行／任务推进）。
 // 只读作者夹具、仅写自建 SQLite 并清自建 mkdtemp；不联网、不读真实档、不修改作者原树。
 import test from 'node:test'
+import {assembleTavernView} from './support/author-view-assembler.mjs'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
@@ -113,6 +114,7 @@ function projectorDeps() {
   const noop = () => undefined
   const idleActivity = { busy: false, phase: 'idle', role: '', operationId: '', basedOn: null, updatedAt: 0 }
   return {
+    assembleTavernView,
     str: value => (value === undefined || value === null ? '' : String(value)),
     readTavernSettings: async () => ({ trustedCardMode: false, frameSizing: 'fill' }),
     readScript: async () => undefined,
@@ -679,18 +681,7 @@ test('最新失败接线：queryFailureCleanup 真实SQLite五场景', async () 
 // 活动轮失败提示：真实 Session events 终止生命周期未结束（无 end）或已 completed 都不得签新 body 目标；
 // 只有"最新 turn/start 之后同轮 turn/end 且 reason error/aborted"才可签；旧失败不得跨新轮。
 test('活动轮失败提示：生成中不签目标且失败结束后才可清理', async () => {
-  const viewSource = [
-    'function view(chat, replayTarget, rollbackState, previous, evidence) {',
-    '  return {',
-    '      canReplayFailedTurn: replayTarget !== null,',
-    '      canClearIncompleteReply: rollbackState.canClearIncompleteReply,',
-    '      undoRollbackTurn: canUndoRollback(chat, evidence.session) ? chat.rollbackUndo.turn : null,',
-    '      rollbackUnavailableReason: rollbackState.reason',
-    '  }',
-    '}',
-    'function hit(copyRollback, chat, replayTarget, previous, evidence) { return {...copyRollback(previous.value),undoRollbackTurn: 1} }',
-    'const pendingForm = { canRollback: true, canClearIncompleteReply: false, }',
-  ].join('\n')
+  const viewSource = applyRollbackPendingViewTransform(readLatestFailureSource(VIEW_REL))
   const wired = applyLatestFailureViewTransform(viewSource)
   const deps = { inspectNativeFailureTail: () => null }
   const { latestFailureTarget } = failureHelpers(wired, deps)
@@ -723,7 +714,8 @@ test('活动轮失败提示：生成中不签目标且失败结束后才可清�
     assert.equal(latestFailureTarget(oldFailure, {turn}, build('none')), null, '旧失败不得跨新轮（新轮 active 仍不签）')
     const completedBody = {...base, timeline: {...base.timeline, operations: {body: {...base.timeline.operations.body, status: 'completed'}}}}
     assert.equal(latestFailureTarget(completedBody, {turn}, build('error')), null, 'body 非 failed（completed）即使 native 失败也不签')
-    // 真实 SQL 窄窗（chat-query-service.queryFailureCleanup 真读 archive_timeline_nodes）：running 不得 cleanable；failed+基准才 cleanable
+    // 真实 SQL 窄窗（chat-query-service.queryFailureCleanup 真读 archive_timeline_nodes）：running 与 failed 同为**候选**
+    // （延迟 discard 读脚本失败会让整次 update 回滚、body 停在 running）；候选不等于可直接清，签发仍由视图 failureEnding 门禁。
     const authorDomain = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/lib/domain/', import.meta.url)
     const jsonMutation = await import(new URL('json-mutation.js', authorDomain).href)
     const treeModule = await import(new URL('copy-json-tree.js', authorDomain).href)
@@ -742,7 +734,9 @@ test('活动轮失败提示：生成中不签目标且失败结束后才可清�
       try { return queryFailureCleanup(narrowDb, {revision: next._storageRevision, timeline: next.timeline}) } finally { narrowDb.close() }
     }
     const running = await readNarrow('running')
-    assert.equal(running.cleanable, false, 'SQL 窄窗：running 轮不得 cleanable（旧条件只 skip completed/foreground-completed 会误判）')
+    assert.equal(running.cleanable, true, 'SQL 窄窗：running 是候选（有发轮前基准），是否真可清由视图 failureEnding 门禁决定')
+    assert.equal(running.turn, turn)
+    assert.equal(running.operationId, 'body')
     const failedNarrow = await readNarrow('failed')
     assert.equal(failedNarrow.cleanable, true, 'SQL 窄窗：failed + 发轮前基准才 cleanable')
     assert.equal(failedNarrow.turn, turn)
@@ -759,7 +753,20 @@ test('活动轮失败提示：生成中不签目标且失败结束后才可清�
       return {events: session.snapshotEvents()}
     })()
     assert.equal(latestFailureTarget(base, {turn}, wrongTurnEnd), null, '异轮 turn/end 不得被当作终止失败')
-    assert.equal(latestFailureTarget({...base, timeline: {...base.timeline, operations: {body: {...base.timeline.operations.body, status: 'running'}}}}, {turn}, build('error')), null, 'native error 但 body 仍 running ⇒ 不签目标')
+    const runningBody = {...base, timeline: {...base.timeline, operations: {body: {...base.timeline.operations.body, status: 'running'}}}}
+    assert.deepEqual(latestFailureTarget(runningBody, {turn}, build('error')),
+      {chatId: 'active-chat', sessionId: 'active-session', turn, branchId: 'b1', revision: 5, operationId: 'body'},
+      'native error + body running 是候选（延迟 discard 未跑完），必须给出确切目标')
+    assert.equal(latestFailureTarget(runningBody, {turn}, build('none')), null, 'running 候选仍需真实终止失败：active（无 end）不得签')
+    assert.equal(latestFailureTarget(runningBody, {turn}, build('completed')), null, 'running 候选仍需真实终止失败：end completed 不得签')
+    // 带 failureEnding、body 仍 `!== 'failed'` 的已施当前代（见上方 priorGeneration 断言）必须被升级成候选式并幂等：
+    // 用本次真实变换产物精确还原旧行来模拟上一已施代（不是造替身），再 apply 必须等于新产物。
+    const priorGeneration = wired.replace("!['failed', 'running'].includes(entry[1].status)", "entry[1].status !== 'failed'")
+    assert.notEqual(priorGeneration, wired, '还原旧行必须真的改到那一处（否则本断言无证据力）')
+    assert.ok(priorGeneration.includes("entry[1].status !== 'failed'"), '模拟的上一已施代必须带旧 failed 判据')
+    const upgradedPrior = applyLatestFailureViewTransform(priorGeneration)
+    assert.equal(upgradedPrior, wired, '已施当前代源码升级后必须与本次产物逐字一致')
+    assert.equal(applyLatestFailureViewTransform(upgradedPrior), upgradedPrior, '已施当前代升级必须幂等')
     // 真实 actual-044 源迁移：旧 marked helper 整段字面换成新 helper，再 apply 必须幂等
     const actual44 = readFileSync(new URL('../../../tmp/repair-044-active-20261010/chat-session-state-188.js', import.meta.url), 'utf8')
     assert.ok(actual44.includes('// [dsh-tavern-latest-failure-view:v1]'), 'actual-044 源必须带 view marker')

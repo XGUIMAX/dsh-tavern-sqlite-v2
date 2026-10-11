@@ -1,8 +1,33 @@
 // 失败/结束信号携带发轮时捕获的不可变身份；轮号复用不是任务身份。
 function once(source,old,next){if(source.split(old).length!==2)throw Error('正文信号归属锚点缺失/不唯一：'+old.slice(0,90));return source.replace(old,next)}
+function persistBodyBeforePreparation(source){
+ const marker='// [dsh-tavern-body-before-prepare:v1]'
+ const foreground="      await savePreparation({source:'foreground.body-before-prepare'})\n      publishRollbackBodySignal(options,chat,foregroundOperation.operationId)"
+ const compatibility="    await store.writeChat(chat,{source:'foreground.body-before-prepare'})\n    publishRollbackBodySignal(options,chat,begun.value.operationId)"
+ if(source.includes(marker)){
+  if(!source.includes(foreground)||!source.includes(compatibility))throw Error('正文准备前基准提交接线不完整')
+  return source
+ }
+ let next=once(source,'      publishRollbackBodySignal(options,chat,foregroundOperation.operationId)',foreground)
+ next=once(next,'    publishRollbackBodySignal(options,chat,begun.value.operationId)',compatibility)
+ return marker+'\n'+next
+}
+function retainFailedScriptForPhysicalRollback(source){
+ const marker='// [dsh-tavern-failed-script-retain:v1]'
+ if(source.includes(marker))return source
+ const legacy=`      if ((chat.mode || 'story') === 'script' && chat.scriptState && chat.scriptState.prepared && Number(chat.scriptState.prepared.nativeTurn) === turn) {
+        const script = await store.readScript(cardPathOf(chat))
+        if (script !== undefined && Array.isArray(script.chunks)) {
+          chat.scriptState = scripts.transition({ script, state: chat.scriptState, event: { kind: 'restore', revision: null, reference: chat.scriptState.prepared } }).state
+          changed = true
+        }
+      }`
+ return once(source,legacy,`      ${marker}
+      // 失败只登记终态；脚本运行状态随用户物理回退恢复，不能因再次读坏脚本而丢失 failed。`)
+}
 export function applyRollbackBodySignalTurnTransform(source){
  const marker='// [dsh-tavern-body-signal-owner:v1]'
- if(source.includes(marker))return source
+ if(source.includes(marker))return retainFailedScriptForPhysicalRollback(persistBodyBeforePreparation(source))
  let next=marker+`\nfunction rollbackBodySignalMatches(chat,input) {
  const owner=input.rollbackBodyOwner,op=chat.timeline?.operations?.[owner?.operationId]
  return !!owner && !chat.rollbackPending && owner.chatId===chat.id && owner.sessionId===chat.sessionId && owner.turn===Number(input.turn) && owner.branchId===chat.timeline?.branchId && op?.kind==='body' && op.status==='running' && Number(op.turn)===owner.turn && op.basedOn?.branchId===owner.branchId
@@ -29,8 +54,8 @@ function publishRollbackBodySignal(options,chat,operationId) {
   }
 
 `+next.slice(end)
- return once(next,'    await store.updateChat(target.id, async function (chat) {',`    await store.updateChat(target.id, async function (chat) {
-      if(['story','script'].includes(chat.mode || 'story') && !rollbackBodySignalMatches(chat,input))return undefined`)
+ return retainFailedScriptForPhysicalRollback(persistBodyBeforePreparation(once(next,'    await store.updateChat(target.id, async function (chat) {',`    await store.updateChat(target.id, async function (chat) {
+      if(['story','script'].includes(chat.mode || 'story') && !rollbackBodySignalMatches(chat,input))return undefined`)))
 }
 export function applyRollbackBodySignalHandoffTransform(source){
  const marker='// [dsh-tavern-body-signal-handoff:v1]'

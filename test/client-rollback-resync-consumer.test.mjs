@@ -7,6 +7,7 @@
 // src/client/features/play-controls.js，built 只剩一份内联），按旧路径喂进来的必然是别代字节。
 // 因此先断言 reader 缝的唯一锚点在真源里**恰好 1 次**：锚点漂移 ⇒ 立刻响亮失败，
 // 不允许部署缝的 once() 或断言路径去猜。
+import test from 'node:test'
 import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 import {applyClientRollbackTransform} from '../deploy/core-host-transform.mjs'
@@ -39,12 +40,12 @@ function callbackFrom(source,{rpcFailure=false,missingSync=false,syncFailure=fal
  const start=source.indexOf('async function rollback()',source.indexOf('function TavernRollbackAction(props)')),end=source.indexOf('if (!canRollback) {',start)
  assert.ok(start>=0 && end>start)
  const order=[],errors=[],view={rolledBack:{sync:{protocol:1,id:'rollback',chatId:'chat-fixture',revision:7}}}
- const fn=new Function('rpc','historyProjection','props','setRolling','setCandidatePanel','setRegenPanel','setCandidateGuidePanel','notifyTavernDataChanged','tavernErrorHub','liveTavernView','tavernCoordination','canRollback','blocked','clearIncomplete','targetTurn',source.slice(start,end)+';return rollback;')(
+ const fn=new Function('rpc','historyProjection','props','setRolling','setCandidatePanel','setRegenPanel','setCandidateGuidePanel','notifyTavernDataChanged','tavernErrorHub','liveTavernView','tavernCoordination','canRollback','blocked','clearIncomplete','targetTurn','rollbackRetryTarget','rollbackRetryOwner','setRollbackRetryTarget','rollbackViewState',source.slice(start,end)+';return rollback;')(
   async(name,args,id)=>{assert.equal(name,'rollbackTurn');assert.equal(args.expectedTurn,3);assert.equal(id,'sync-fixture');order.push('rpc');if(rpcFailure)throw Error('RPC失败');return {view}},
   {rolledBack:(id,value)=>{assert.equal(id,'sync-fixture');assert.equal(value,view);order.push('projection')}},
   {sessionId:'sync-fixture',sessions:missingSync?{}:{waitForTavernRollbackSync:async r=>{assert.equal(r,view.rolledBack.sync);order.push('sync:wait');if(syncFailure)throw Error('sync失败');return !superseded}}},
   value=>order.push(value?'rolling:start':'rolling:end'),()=>order.push('panels'),()=>{},()=>{},()=>{throw Error('不应广播全局data-changed')},
-  {report:(_name,error)=>errors.push(error)},{setView:()=>order.push('view:set'),invalidate:()=>order.push('view:invalidate')},{invalidate:()=>order.push('coord:invalidate')},true,false,false,3)
+  {report:(_name,error)=>errors.push(error)},{setView:()=>order.push('view:set'),invalidate:()=>order.push('view:invalidate'),rebase:()=>order.push('view:rebase')},{invalidate:()=>order.push('coord:invalidate')},true,false,false,3,null,{current:'sync-fixture'},()=>{},{view:{rollbackTarget:null}})
  return {fn,order,errors}
 }
 // fail-closed 边界：作者把 finally 的 setRolling(false) 留在滚动窗口内，缝再撤销 live/协调失效；
@@ -60,7 +61,7 @@ assert.throws(()=>oldReader.accept({view:{turn:99},viewCursor:'stale'}),/过期/
 assert.equal(applyRollbackViewReaderTransform(readerSource),readerSource)
 // 2.5.0 只有两条通道：built（lib/client.js 整份内联产物）与 source（src/client/features/play-controls.js，
 // 作者已把 TavernRollbackAction 从 main.js 拆出去）。与 deploy/client-seams.mjs 的真实施缝目标逐字一致。
-for(const relative of ['lib/client.js','src/client/features/play-controls.js']){
+for(const relative of ['lib/client.js','src/client/features/play-controls.js'])test('回退同步消费者：'+relative,async()=>{
  const raw=authorRead(relative)
  // —— 已声明的产品缺口 V-1（只报不改，与 standard-seams.test.mjs 同一登记口径）——
  // 2.5.0 把 TavernRollbackAction 位移到 src/client/features/play-controls.js，但该文件里**没有**
@@ -74,7 +75,7 @@ for(const relative of ['lib/client.js','src/client/features/play-controls.js']){
   assert.match(String(error.message),/回退同步作者锚点缺失\/不唯一/,'src通道缺锚点必须 fail-closed 拒绝，而不是静默产出')
   console.log(relative+'：产品缺口 V-1 未验证 —— 该通道缺 `const slots = ctx.slots;` 锚点，'
    +'deploy/rollback-sync-author-transform.mjs:42 无法施缝（需产品决策，本闸只登记不代改）')
-  continue
+  return
  }
  assert.equal(applyClientRollbackTransform(source),source)
  assert.ok(!source.includes('await nativeSession.resync()'))
@@ -187,4 +188,4 @@ for(const relative of ['lib/client.js','src/client/features/play-controls.js']){
   channel.close()
  }finally{ if(priorWindow===undefined)delete globalThis.window; else globalThis.window=priorWindow }
  console.log(relative+': 真callback等待push/无二次刷新/旧代升级/失败硬闸/旧live view与coordination拒绝通过')
-}
+})
