@@ -239,14 +239,40 @@ var menuFailureTarget = clearIncomplete ? (rollbackViewState.view && rollbackVie
 						setCandidatePanel(null); setRegenPanel(null); setCandidateGuidePanel(null);
 						return result;
 					}`
+// 菜单侧最终形态＝作者原样 props 透传：CandidateDockActions 已把 props 原样交给 TavernMoreActions，
+// 再由 MoreActions 交给 TavernRollbackAction；共享服务取用函数必须在**持有 ctx 的 register 闭包**里
+// 注入到 dock 注册的 props 对象上（作者 play-controls.js 的 CandidateDockActions 注册行），
+// 不能在 MoreActions 内引用作用域外的 ctx（那会抛 ReferenceError: ctx is not defined）。
 const ROLLBACK_UI_OLD = 'React.createElement(TavernRollbackAction, props)'
-const ROLLBACK_UI_NEW = 'React.createElement(TavernRollbackAction, Object.assign({}, props, { storageUi: function () { return ctx.get("tavernStorageUi") } }))'
+/** 上一代(0.4.4)错误形态：MoreActions 内内联引用作用域外 ctx；升级时回退为 props 透传。 */
+const ROLLBACK_UI_CTX_INLINE = 'React.createElement(TavernRollbackAction, Object.assign({}, props, { storageUi: function () { return ctx.get("tavernStorageUi") } }))'
+const DOCK_UI_ANCHOR = 'React.createElement(CandidateDockActions, Object.assign({}, props, {'
+const DOCK_UI_NEW = DOCK_UI_ANCHOR + ' storageUi: function () { return ctx.get("tavernStorageUi") },'
+/** 作者 onError 旧标签（清理已交共享服务，标签须说明"干净清理错误"）；只替这一句。 */
+const ERROR_LABEL_OLD = 'tavernErrorHub.report("保存错误提示状态失败", error);'
+const ERROR_LABEL_NEW = 'tavernErrorHub.report("干净清理错误失败", error);'
 function ensureRollbackUiWiring(source) {
-  const oldHits = source.split(ROLLBACK_UI_OLD).length - 1
-  const newHits = source.split(ROLLBACK_UI_NEW).length - 1
-  if (oldHits === 0 && newHits === 1) return source
-  if (oldHits === 1 && newHits === 0) return source.replace(ROLLBACK_UI_OLD, ROLLBACK_UI_NEW)
-  throw new Error('干净清理菜单共享接线缺失/不唯一：old=' + oldHits + ',new=' + newHits)
+  let out = source
+  // ① 旧内联形态 → 回到 props 透传（once 保证锚点唯一；仍残留即拒绝）
+  if (out.includes(ROLLBACK_UI_CTX_INLINE)) out = once(out, ROLLBACK_UI_CTX_INLINE, ROLLBACK_UI_OLD, '菜单内联取用函数回退为props透传')
+  if (out.includes(ROLLBACK_UI_CTX_INLINE)) throw new Error('干净清理菜单仍引用作用域外 ctx，拒绝清理接线')
+  // ② 报错标签：新旧并存或重复都拒绝
+  const labelNew = out.split(ERROR_LABEL_NEW).length - 1
+  if (labelNew > 1) throw new Error('干净清理错误标签重复：' + labelNew)
+  if (labelNew === 0) out = once(out, ERROR_LABEL_OLD, ERROR_LABEL_NEW, '干净清理错误标签')
+  else if (out.includes(ERROR_LABEL_OLD)) throw new Error('干净清理错误标签半截：新旧标签并存，拒绝')
+  // ③ props 透传守卫：菜单必须以作者原样 props 调用 RollbackAction（恰 1）；被外改/丢失时即使 dock getter
+  //    在场，菜单也取不到服务，不能按幂等放过
+  const passthrough = out.split(ROLLBACK_UI_OLD).length - 1
+  if (passthrough !== 1) throw new Error('菜单 RollbackAction 必须保持作者原样 props 透传且唯一：hits=' + passthrough)
+  // ④ 注册处：已有合法 getter 则幂等（并拒绝重复/残留裸锚点），否则唯一注入
+  const dockNew = out.split(DOCK_UI_NEW).length - 1
+  if (dockNew > 1) throw new Error('注册处共享服务取用接线重复：' + dockNew)
+  if (dockNew === 1) {
+    if (out.split(DOCK_UI_NEW).join('').includes(DOCK_UI_ANCHOR)) throw new Error('注册处共享服务取用接线重复：另有未注入的 dock 锚点')
+    return out
+  }
+  return once(out, DOCK_UI_ANCHOR, DOCK_UI_NEW, '注册处注入共享服务取用函数')
 }
 function ensureDelegatedMenu(source) {
   let out = source

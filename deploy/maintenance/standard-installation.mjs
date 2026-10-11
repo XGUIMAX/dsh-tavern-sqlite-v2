@@ -33,6 +33,36 @@ export function parsePatch(text) {
 function pathName(name, expected) {
   return typeof name === 'string' && path.isAbsolute(name) && path.resolve(name) === path.resolve(expected)
 }
+/**
+ * 普通行（ORDINARY_ROW_ID）的当前状态。**只读判定，不修改**：唯一、归属（plugin.js 或 guard）、启用、可控入口存在。
+ * 旧 044 只有三条 early ⇒ 这里给出 absent，供 preflight 判"可升级"；由 assertAssembly('install') 决定是否强拒。
+ */
+function ordinaryState(doc, dir) {
+  // 顶层同 id 行（非 insert 的覆盖形态）优先参与判定：用户显式 disabled **或任何影响接线/行为的键**
+  // （name/inject/config/...）都必须被看见——否则安装器会先 strip 普通行、却让外部 override 生效，等于静默改变接线。
+  const overrides = doc.contents.items.filter(op => !op?.get?.('insert', true) && op?.get?.('id') === ORDINARY_ROW_ID)
+  if (overrides.some(row => row.get?.('disabled') === true)) return { present: true, ok: false, reason: 'top-level-disabled' }
+  for (const row of overrides) {
+    const keys = (row.items ?? []).map(item => String(item?.key?.value ?? item?.key ?? ''))
+    if (keys.some(key => key !== '' && key !== 'id' && key !== 'disabled')) return { present: true, ok: false, reason: 'override-conflict' }
+  }
+  const rows = inserted(doc).filter(row => row.get?.('id') === ORDINARY_ROW_ID)
+  if (rows.length === 0) return { present: false, ok: false, reason: 'absent' }
+  if (rows.length !== 1) return { present: true, ok: false, reason: 'duplicate' }
+  const row = rows[0]
+  const name = row.get?.('name')
+  const ownedByPlugin = pathName(name, path.join(dir, 'plugin.js'))
+  const ownedByGuard = pathName(name, path.join(dir, '.tavern-entry.mjs'))
+  if (!ownedByPlugin && !ownedByGuard) return { present: true, ok: false, reason: 'foreign-owner' }
+  if (row.get?.('disabled') === true) return { present: true, ok: false, reason: 'disabled' }
+  const entry = ownedByPlugin ? ORDINARY_ENTRY_FILES[0] : ORDINARY_ENTRY_FILES[1]
+  const file = path.join(dir, entry)
+  const info = stat(file)
+  if (!info) return { present: true, ok: false, reason: 'entry-missing' }
+  // 名字对不算归属：symlink/目录/其他非普通文件不得借名认领我们自己的入口（缺入口可复修，冒充不行）。
+  if (info.isSymbolicLink() || !info.isFile()) return { present: true, ok: false, reason: 'entry-not-regular' }
+  return { present: true, ok: true, reason: 'ok', entry }
+}
 function inserted(doc) {
   return doc.contents.items.flatMap(op => {
     const rows = op?.get?.('insert', true)
@@ -67,6 +97,23 @@ function stripRows(doc, pluginDir) {
     if (!rows.items.length) doc.contents.items.splice(i, 1)
   }
 }
+/**
+ * 顶层同 id 覆盖行的用户冲突（安装前拒，且零写）。
+ * 只认 insert 之外、id === ORDINARY_ROW_ID 的顶层行；本包合同保证普通行只以顶层插入存在，不解析 group 子树。
+ */
+function assertNoOrdinaryOverrideConflict(doc) {
+  // insert 形态的普通行被显式 disabled 同样是用户冲突（首装直连 manage 也必须拒，不能等 preflight）。
+  const insertedRow = inserted(doc).find(row => row.get?.('id') === ORDINARY_ROW_ID)
+  if (insertedRow?.get?.('disabled') === true) throw Error('普通入口行被用户显式 disabled（配置冲突），拒绝安装/静默重置：' + ORDINARY_ROW_ID)
+  for (const op of doc.contents.items) {
+    if (op?.get?.('insert', true) || op?.get?.('id') !== ORDINARY_ROW_ID) continue
+    if (op.get?.('disabled') === true) throw Error('普通入口行被用户显式 disabled（配置冲突），拒绝安装/静默重置：' + ORDINARY_ROW_ID)
+    const extra = (op.items ?? [])
+      .map(item => String(item?.key?.value ?? item?.key ?? ''))
+      .filter(key => key !== '' && key !== 'id' && key !== 'disabled')
+    if (extra.length > 0) throw Error('普通入口行被用户顶层覆盖（' + extra.join(',') + '）影响接线，拒绝安装：' + ORDINARY_ROW_ID)
+  }
+}
 function print(doc, original) {
   doc.contents.flow = false
   const text = doc.toString({ lineWidth: 0 })
@@ -74,6 +121,9 @@ function print(doc, original) {
 }
 export function installOwnedRows(text, { pluginDir, home } = {}) {
   const doc = parsePatch(text)
+  // 先于 stripRows 判用户冲突：任何"非 insert 的同 id 覆盖行"（disabled 或 name/inject/config 等影响接线的键）
+  // 都拒绝安装，且不写出任何字节——首装（state.absent）同样不得静默 reset 掉用户的显式配置。
+  assertNoOrdinaryOverrideConflict(doc)
   stripRows(doc, pluginDir)
   const overrides = DISABLED_IDS.map(id => doc.contents.items.filter(op => op?.get?.('id') === id && !op?.get?.('insert')))
   for (let i = 0; i < overrides.length; i++) {
@@ -90,6 +140,11 @@ export function installOwnedRows(text, { pluginDir, home } = {}) {
   rows[0].config = { root: path.join(home, 'profile-data', 'tavern', 'sessions') }
   rows[2].inject = ['loader', 'sessionPersistence', 'tavernStorageBootstrapReady']
   rows[2].config = { persistedSeams: true }
+  // 普通行（作者 data/plugins 扫描的 apply 入口）：同 id 直接指向本包 plugin.js。
+  //   · 不另造 guard 文件/不复制一份入口；作者侧 syncUserPlugins 之后同 id 会转成其 guard 形式，
+  //     两者都在 ORDINARY_ENTRY_FILES 归属清单内（installedOwned 同一判据）。
+  //   · 第一次桌面进程尚无作者 sync ⇒ 先用 plugin.js 起来；后续进程从 guard 读同一 id，不双源。
+  rows.push({ id: ORDINARY_ROW_ID, name: path.join(pluginDir, 'plugin.js') })
   const op = doc.createNode({ insert: rows })
   op.commentBefore = ' dsh-tavern-sqlite-v2: 持久启动装配；安装一次，正常启动自动加载，无额外安装命令'
   doc.contents.items.push(op)
@@ -177,7 +232,9 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
       if (rows.find(row => row.get('id') === PERSISTED_ROWS[0].id)?.get('config')?.get('root') !== path.join(op.home, 'profile-data', 'tavern', 'sessions')) throw Error('SQLite 会话根装配漂移，拒绝修改数据库位置')
       if (rows.find(row => row.get('id') === PERSISTED_ROWS[2].id)?.get('config')?.get('persistedSeams') !== true) throw Error('标准启动未声明持久区块合同')
       for (const id of DISABLED_IDS) if (!doc.contents.items.some(row => row.get?.('id') === id && row.get?.('disabled') === true)) throw Error('标准接管缺少禁用原入口：' + id)
-      return { present: true, layout: 'standard', dir: pluginDir }
+      // 普通行只作为**状态**登记（旧 044 仅 early ⇒ absent 合法可升级）；强拒放在 assertAssembly('install')。
+      const ordinary = ordinaryState(doc, pluginDir)
+      return { present: true, layout: 'standard', dir: pluginDir, ordinary }
     }
     if (dep || bundle || linked) {
       if (!(dep && bundle && linked)) throw Error('旧 profile 装配不完整，拒绝猜测')
@@ -230,6 +287,12 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
   async function manage(action, root = incoming) {
     if (!['install', 'uninstall'].includes(action)) throw Error('标准装配动作必须是 install/uninstall')
     capture(); assertUnchanged()
+    // 直连 manage 也必须看见磁盘上的用户冲突（不依赖调用方传入 text，也不依赖先跑 preflight）：
+    // 拒绝发生在任何 clearCurrent/writeState 之前 ⇒ 零写。
+    if (action === 'install') assertNoOrdinaryOverrideConflict(parsePatch(bytes(patchFile)?.toString('utf8') ?? '[]'))
+    // 进入写阶段即视作"本次安装"：清掉上一次 restore 的标记，否则同一 helper 先 restore 再 install
+    // 会因 restored=true 跳过新普通入口验收（写前、冲突拒之后）。
+    restored = false
     // 写/移程序前先验所有父目录；不能清掉旧装配之后才发现标准目的越界。
     for (const file of [...paths, profileFile, patchFile]) assertSafe(file, op.home)
     const pkg = json(profileFile)
@@ -264,6 +327,12 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
   function assertAssembly(action) {
     const now = inspect()
     if (now.present !== (action === 'install') || (action === 'install' && now.layout !== 'standard' && !(restored && state?.layout === 'legacy'))) throw Error('标准插件目录/持久装配回读不一致')
+    // 仅**本次安装**强核普通入口合同：唯一 + 归属(plugin.js/guard) + 启用 + 常规入口存在。
+    // 卸载/restore 不回填新行、不强迫首启合同（restore 后的旧 early-only 合法状态照旧通过）。
+    if (action === 'install' && now.layout === 'standard' && !restored) {
+      const ordinary = now.ordinary ?? { ok: false, reason: 'absent' }
+      if (!ordinary.ok) throw Error('标准普通入口装配不符（' + ordinary.reason + '）：需要唯一且启用、归属 plugin.js 或 .tavern-entry.mjs、入口文件存在')
+    }
     return now
   }
   async function preflight(action) {
@@ -274,12 +343,25 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
     // 本包自有清单完整性：标准目录/持久装配变更之前先拒（缺非空 name/version 的启动入口清单会让
     // 装配后的首个请求在宿主请求扩展准备期失败）。只判输入包根；copyPackage 逐字节复制，故无需再判 incoming。
     if (action === 'install') assertBootstrapManifestComplete(packageRoot)
+    // 用户配置冲突（普通入口行 disabled / 顶层 override 带接线键）与现场是否已装无关：
+    // 首装（state.absent）也必须响亮拒绝，不能"看不见"就静默 reset 用户显式配置。此处仍零写。
+    if (action === 'install') {
+      const conflict = ordinaryState(parsePatch(expected.patch?.toString('utf8') ?? '[]'), pluginDir)
+      if (conflict.reason === 'disabled' || conflict.reason === 'top-level-disabled') throw Error('普通入口行被用户显式 disabled（配置冲突），拒绝静默启用：' + ORDINARY_ROW_ID)
+      if (conflict.reason === 'override-conflict') throw Error('普通入口行被用户顶层覆盖影响接线，拒绝安装：' + ORDINARY_ROW_ID)
+    }
     // 提前校验归属/配置冲突，不在停服后才发现不可安装的 patch。
     if (action === 'install') installOwnedRows(expected.patch?.toString('utf8'), { pluginDir, home: op.home })
     else uninstallOwnedRows(expected.patch?.toString('utf8'), { pluginDir })
     if (action === 'install' && state.present) {
       const { samePackage, copyPackage } = await import('./runner.mjs')
       state.upgrading = state.layout !== 'standard' || !samePackage(packageRoot, state.dir)
+      // 普通入口缺席/坏入口（旧 044 仅 early、或归属/唯一/入口丢失）同样是**升级**，不能因 samePackage=true 就 noop。
+      const ordinary = state.ordinary ?? { ok: false, reason: 'absent' }
+      if (ordinary.ok !== true) {
+        if (ordinary.reason === 'disabled' || ordinary.reason === 'top-level-disabled') throw Error('普通入口行被显式 disabled（用户配置冲突），拒绝静默启用：' + ORDINARY_ROW_ID)
+        state.upgrading = true
+      }
       if (incoming === packageRoot && (path.resolve(packageRoot) === path.resolve(state.dir) || realpathSync(packageRoot) === realpathSync(state.dir))) {
         incoming = path.join(evidence, 'assembly-input-package')
         if (stat(incoming)) throw Error('本次输入程序目录已占用')

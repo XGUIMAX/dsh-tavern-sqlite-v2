@@ -38,6 +38,7 @@ import { clientCoreWrites } from './client-seams.mjs'
 import { applyForkHistoryTransform } from './fork-history-transform.mjs'
 import { applyNativeDataTransform, isNativeDataApplied, ANCHORS as NATIVE_DATA_ANCHORS } from './native-data-transform.mjs'
 import { applyNativeMessageTransform, isNativeMessageApplied, applyNativeMessageHostTransform } from './native-data-transform.mjs'
+import { applyForkRequestTransform } from './fork-request-transform.mjs'
 import { applyLatestFailureHostTransform, applyLatestFailureViewTransform } from './latest-failure-transform.mjs'
 import { applyActivityStateTransform } from './activity-state-transform.mjs'
 import { helperReadonlySource } from './helper-readonly-source.mjs'
@@ -92,6 +93,9 @@ export function buildCore(appDir, sourceFiles) {
   write.set('tavern-plugin/lib/http/routes.js', applySessionResourceRouteTransform(text(appDir, 'tavern-plugin/lib/http/routes.js')))
   write.set(DOMAIN + 'background-session-retirement.js', applyBackgroundRetirementTransform(text(appDir, DOMAIN + 'background-session-retirement.js')))
   if(indexSource.includes('  registerTurnLifecycleHooks({'))write.set('tavern-plugin/lib/hooks/turn-lifecycle.js',applyRollbackBodyCommitHooksTransform(applyRollbackBodySignalHooksTransform(text(appDir,'tavern-plugin/lib/hooks/turn-lifecycle.js'))))
+  // 上游请求 hook 的前台入口：parentSession 不再一律跳过（依据见 fork-request-transform.mjs）。
+  // presence 判源码存在；`index.js` 实有 registerRequestHooks 才施缝（旧代不硬造）。
+  if(present('tavern-plugin/lib/hooks/request.js')&&indexSource.includes('registerRequestHooks'))write.set('tavern-plugin/lib/hooks/request.js',applyForkRequestTransform(text(appDir,'tavern-plugin/lib/hooks/request.js')))
   write.set('tavern-plugin/lib/background-agent-sessions.js', applyRollbackBackgroundLifetimeTransform(text(appDir, 'tavern-plugin/lib/background-agent-sessions.js')))
   write.set('tavern-plugin/lib/background-agent-task.js', applyBackgroundTaskRollbackTransform(text(appDir, 'tavern-plugin/lib/background-agent-task.js')))
   write.set(DOMAIN + 'tavern-script-host-adapter.js', applyRollbackWorldbookAdapterTransform(applyRollbackCharacterAdapterTransform(applyRollbackGlobalAdapterTransform(applyHelperCurrentTransform(applyRuntimeTransform(text(appDir, DOMAIN + 'tavern-script-host-adapter.js')))))))
