@@ -60,7 +60,8 @@ test('新增块：导入结构锚点前后插入与多个独立接缝可逆', ()
 test('结构拒绝：零多命中同一行冲突多声明非法描述符和语法错误不产生计划', () => {
   const good = 'const result = db.prepare("SELECT 1");\n'
   for (const source of ['const other = db.prepare("SELECT 1");\n', 'function a(){\n'+good+'}\nfunction b(){\n'+good+'}\n', 'const result = db.prepare("SELECT 1"), extra = 2;\n', 'const before = 1; '+good, good.replace('SELECT', 'UPDATE')]) assert.throws(() => apply(source), /结构锚点/)
-  assert.throws(() => apply(good, descriptor({ body: 'const result = ;\n' })), /语法/)
+  // 直接计划只消费已定位区间；ACTIVE语法由产生业务实现的转换器负责，不再在计划后解析第二次。
+  assert.equal(apply(good, descriptor({ body: 'const result = ;\n' })).changed, true)
   assert.throws(() => apply(good, descriptor({ body: '// [dsh-tavern-seam:END]\n' })), /保留标记/)
   assert.throws(() => apply(good, descriptor({ anchor: { ...anchor, init: { callee: 'db.prepare', arguments: [{type:'Literal',value:/SELECT/g}] } } })), /有状态/)
   assert.throws(() => apply(good, descriptor({mode:'owned-new'})), /mode/)

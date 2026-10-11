@@ -103,7 +103,7 @@ test('最新施工：完整接入及现场卸载', t => {
     assert.ok(installed.includes('chats: chatPersistence, runtimeGeneration,'))
     for (const method of Object.keys(SAVE_HANDLERS)) assert.equal(installed.includes("case '" + method + "':"), false, method)
     assert.ok(installed.includes('lastNativeTurn'))
-    assert.equal(maintenanceTargets.length, 61)
+    assert.equal(maintenanceTargets.length, 62)
 
     // 块外用户说明必须保留，卸载恢复现场原文而非旧官方整文件。
     const userComment = '\n// 用户现场说明，卸载必须保留\n'

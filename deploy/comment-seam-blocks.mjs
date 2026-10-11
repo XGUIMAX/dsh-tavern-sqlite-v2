@@ -9,7 +9,7 @@
 //   上述任一格式即拒，唯一例外是 ORIGINAL 区内的 `// `+原文行；③ 只返回原文区间，块外字节永不触碰，不做 AST 生成。
 // regions[name]={beginStart,beginEnd,endStart,endEnd} = *_BEGIN / *_END 标记行的行首与行尾（含 EOL）；
 //   子区域内容 = text.slice(regions[name].beginEnd, regions[name].endStart)。
-import { parse } from '../lib/vendor/acorn/acorn.mjs'
+import { parse, tokenizer } from '../lib/vendor/acorn/acorn.mjs'
 
 const PREFIX = '[dsh-tavern-seam'
 const BEGIN_RE = /^[ \t]*\[dsh-tavern-seam:BEGIN\](?=[ \t]|$)/
@@ -77,16 +77,21 @@ function readBegin(rel, tail) {
  * block.start = BEGIN 标记行行首；block.end = END 标记行行尾（含 EOL）⇒ 整块按整行增删、不残留空行。
  * @returns {{ast: object, blocks: Array<{metadata: object, start: number, end: number, text: string, regions: object}>}}
  */
-export function parseSeamSource(source, { rel = 'source.js' } = {}) {
+export function parseSeamSource(source, { rel = 'source.js', ast: needsAst = true } = {}) {
   if (typeof source !== 'string') fail(rel, 'source 必须是字符串（不做 String() 隐式转换）')
   const text = source, comments = [], blocks = [], ids = new Set()
   let ast, open = null
   try {
-    ast = parse(text, {
+    const options = {
       ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true,
-      // Acorn 回调形态是 (block:boolean, value, start, end, …)：block=false 才是 Line 注释。
       onComment: (block, value, start, end) => comments.push({ block, value, start, end })
-    })
+    }
+    if (needsAst) ast = parse(text, options)
+    else if (text.includes(PREFIX)) {
+      // 区块归属只需要真实注释词法；无标记文本不再生成AST或验证作者语法。
+      const tokens = tokenizer(text, options)
+      while (tokens.getToken().type.label !== 'eof') { /* 仅收注释 */ }
+    }
   } catch (error) { fail(rel, '语法无法解析，拒绝在未知语法上定位接缝：' + (error && error.message)) }
   for (const comment of comments) {
     const body = comment.value

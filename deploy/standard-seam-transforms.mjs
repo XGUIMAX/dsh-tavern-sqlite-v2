@@ -43,6 +43,7 @@ import { applyLatestFailureHostTransform, applyLatestFailureViewTransform } from
 import { applyActivityStateTransform } from './activity-state-transform.mjs'
 import { helperReadonlySource } from './helper-readonly-source.mjs'
 import { viewAssemblerSource } from './view-assembler-source.mjs'
+import { needsPluginTaskSeams, applyPluginTaskHostTransform, applyPluginTaskApiTransform } from './plugin-task-quiescence-transform.mjs'
 
 
 export const STORAGE_PACKAGE_RESOLVER = `// [dsh-tavern-standard-owned:v1]
@@ -79,6 +80,10 @@ export function buildCore(appDir, sourceFiles) {
   write.set('tavern-plugin/lib/index.js', applyRollbackBodyCommitHostTransform(applyRollbackBodySignalHostTransform(applyRollbackSharedBranchHostTransform(applyRollbackWorldbookBindingsHostTransform(applyRollbackWorldbookHostTransform(applyRollbackCharacterHostTransform(applyRollbackBackgroundOwnerHostTransform(applyRollbackGlobalHostTransform(applyRollbackHostTransform(applyBackgroundHostRollbackTransform(applyCompactionWarningTransform(applyHostTransform(indexSource)))))))))))))
   write.set('tavern-plugin/lib/index.js', applyLatestFailureHostTransform(applyRollbackWorldbookHistoryHostTransform(applyRollbackSyncHostTransform(write.get('tavern-plugin/lib/index.js')))))
   write.set('tavern-plugin/lib/index.js', applyCurrentResourceHostTransform(applyBackgroundRetirementHostTransform(applyForkHistoryTransform(write.get('tavern-plugin/lib/index.js')))))
+  if(needsPluginTaskSeams(write.get('tavern-plugin/lib/index.js'))) {
+    write.set('tavern-plugin/lib/index.js',applyPluginTaskHostTransform(write.get('tavern-plugin/lib/index.js')))
+    write.set('tavern-plugin/lib/plugin-api.js',applyPluginTaskApiTransform(text(appDir,'tavern-plugin/lib/plugin-api.js')))
+  }
   const saveHost = write.get('tavern-plugin/lib/index.js')
   if (saveHost.includes('  async function exportGameSave(') || saveHost.includes('// [dsh-tavern-db-save:v1]')) {
     write.set('tavern-plugin/lib/index.js', applyDbSaveFootprintHostTransform(applyDbSaveHostTransform(saveHost)))

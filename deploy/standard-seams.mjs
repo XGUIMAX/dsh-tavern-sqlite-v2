@@ -1,99 +1,129 @@
-// 源码接缝按现场区块装卸；记录仅是可选摘要，不携带或核验作者历史片段。
+// 一次定位当前接缝，直接注入现场区块；不复制预演，不认证作者原件，不重算验收计划。
 import fs from 'node:fs'
 import path from 'node:path'
 import { buildCore } from './standard-seam-transforms.mjs'
-import { parse } from '../lib/vendor/acorn/acorn.mjs'
 import { parseSeamSource } from './comment-seam-blocks.mjs'
 import { planSeamInstall, planSeamUninstall } from './comment-seam-plan.mjs'
-import { describeSeamChanges, sameSeamProgram } from './comment-seam-descriptors.mjs'
-import { applyCommentSeams, COMMENT_SEAMS_RECORD, ownedFileBlock, wrapOwnedFile } from './comment-seam-files.mjs'
+import { describeSeamChanges } from './comment-seam-descriptors.mjs'
+import { COMMENT_SEAMS_RECORD, wrapOwnedFile } from './comment-seam-files.mjs'
 const OWNER='dsh-tavern-sqlite-v2', DOMAIN='tavern-plugin/lib/domain/'
-const HOST=['index.js','client.js','background-agent-task.js','background-agent-sessions.js','http/routes.js','hooks/turn-lifecycle.js','hooks/request.js']
+const HOST=['index.js','plugin-api.js','client.js','background-agent-task.js','background-agent-sessions.js','http/routes.js','hooks/turn-lifecycle.js','hooks/request.js']
 const SOURCE=['main.js','features/play-controls.js','features/turn-history.js','turn-error-controls.js','ui/error-center.js','helper-resources.js','runtime/helper-bootstrap.js','runtime/helper-script-runtime.js','modules/host-session-patch.js','modules/session-view-sync.js','modules/live-tavern-view.js','modules/tavern-coordination.js']
 const DOMAINS=['chat-sqlite-store.js','tavern-conversation-registry.js','conversation-initialization.js','session-view-reader.js','legacy-view-seams.js','round-history.js','story-timeline.js','model-error-presentation.js','tavern-script-host-adapter.js','tavern-script-dispatch.js','server-template-runtime.js','conversation-fork-point.js','chat-history-rescue.js','opening-preparation.js','storage-opening-runtime.js','storage-native-data.js','storage-fork-history.js','storage-server-execution.js','storage-helper-readonly.js','storage-rollback.js','storage-budgets.js','storage-package.js','storage-db-save.js','storage-current-variables.js','storage-compaction-warning.js','read-variables.js','storage-rollback-business.js','storage-failure-state.js','turn-orchestration.js','settlement-jobs.js','foreground-handoff.js','server-template-sync.js','candidate-worldbook-preparation.js','auto-compaction.js','chat-session-state.js','card-summary-cache.js','worldbook-library.js','file-resources.js','session-resource-access.js','background-session-retirement.js','game-footprint.js','background-task-coordinator.js']
 export const maintenanceTargets=Object.freeze([...HOST.map(s=>'tavern-plugin/lib/'+s),...SOURCE.map(s=>'tavern-plugin/src/client/'+s),...DOMAINS.map(s=>DOMAIN+s)])
 const OLD_RECORDS=['.tavern-standard-seams.json','.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
 const utf8=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true})
 function safeFile(root,rel){
-  if(!maintenanceTargets.includes(rel)&&!['tavern-plugin/package.json',COMMENT_SEAMS_RECORD,...OLD_RECORDS].includes(rel))throw Error('标准目标越过有限清单：'+rel)
-  const file=path.resolve(root,rel)
-  for(let p=file;;p=path.dirname(p)){let st;try{st=fs.lstatSync(p)}catch(e){if(e.code!=='ENOENT')throw e}if(st?.isSymbolicLink())throw Error('标准源码不接受链接：'+rel);if(p===path.dirname(p))break}
-  return file
+ if(!maintenanceTargets.includes(rel)&&!['tavern-plugin/package.json',COMMENT_SEAMS_RECORD,...OLD_RECORDS].includes(rel))throw Error('源码路径不属于接缝清单：'+rel)
+ const file=path.resolve(root,rel)
+ for(let p=file;;p=path.dirname(p)){let st;try{st=fs.lstatSync(p)}catch(e){if(e.code!=='ENOENT')throw e}if(st?.isSymbolicLink())throw Error('接缝目标不能是外部链接：'+rel);if(p===path.dirname(p))break}
+ return file
 }
-function read(root,rel){const file=safeFile(root,rel);try{return utf8.decode(fs.readFileSync(file))}catch(e){if(e.code==='ENOENT')return null;throw e}}
+function read(root,rel){try{return utf8.decode(fs.readFileSync(safeFile(root,rel)))}catch(e){if(e.code==='ENOENT')return null;throw e}}
 function context(appDir){
-  if(typeof appDir!=='string'||!path.isAbsolute(appDir))throw Error('标准接入须指定绝对应用路径')
-  const root=path.resolve(appDir),pkg=JSON.parse(read(root,'tavern-plugin/package.json'))
-  if(pkg.name!=='dsh-tavern-plugin'||typeof pkg.version!=='string')throw Error('作者包身份不符')
-  for(const rel of OLD_RECORDS){const file=safeFile(root,rel);try{fs.lstatSync(file);throw Error('检测到旧机制记录，请先使用旧版插件维护CLI卸载：'+rel)}catch(e){if(e.code!=='ENOENT')throw e}}
-  const current=new Map(),original=new Map(),bridges=new Map(),blocks=new Set()
-  for(const rel of maintenanceTargets){
-    const source=read(root,rel);if(source===null)continue
-    current.set(rel,source)
-    const parsed=parseSeamSource(source,{rel})
-    if(parsed.blocks.some(b=>b.metadata.owner===OWNER))blocks.add(rel)
-    const bridge=ownedFileBlock(source,{rel,owner:OWNER})
-    if(bridge){bridges.set(rel,bridge);continue}
-    const projection=planSeamUninstall(source,{rel,owner:OWNER}).source
-    // 只识别撤缝投影里的真实旧注释；ACTIVE 兼容标签、字符串伪标记不是旧机制。
-    const comments=[]
-    parse(projection,{ecmaVersion:'latest',sourceType:'module',allowHashBang:true,onComment:comments})
-    if(comments.some(c=>c.type==='Line'&&(/\[dsh-tavern-(?:core-host|standard-owned|legacy-view-seams|save-ui-seam):v\d/.test(c.value)||/^\s*\[dsh-tavern-sqlite-v2\]/.test(c.value))))throw Error('旧接缝残留，请用旧版CLI卸载：'+rel)
-    original.set(rel,projection)
-  }
-  return {root,pkg,current,original,bridges,blocks}
+ if(typeof appDir!=='string'||!path.isAbsolute(appDir))throw Error('须定位酒馆绝对目录')
+ const root=path.resolve(appDir),pkg=JSON.parse(read(root,'tavern-plugin/package.json'))
+ if(pkg.name!=='dsh-tavern-plugin')throw Error('目标不是酒馆目录')
+ for(const rel of OLD_RECORDS)if(fs.existsSync(safeFile(root,rel)))throw Error('旧机制接缝须先用所属旧入口卸载：'+rel)
+ const current=new Map(),original=new Map(),owned=new Map()
+ for(const rel of maintenanceTargets){
+  const source=read(root,rel);if(source===null)continue
+  current.set(rel,source)
+  if(source.includes('[dsh-tavern-v1-storage-host:v1]'))throw Error('目标仍有V1接管，请先用V1入口卸载')
+  const parsed=parseSeamSource(source,{rel,ast:false}),bridge=parsed.blocks.find(b=>b.metadata.owner===OWNER&&b.metadata.id==='owned-file')
+  if(bridge){owned.set(rel,bridge);continue}
+  original.set(rel,planSeamUninstall(source,{rel,owner:OWNER,parsed}).source)
+ }
+ return {root,pkg,current,original,owned}
 }
-function targetsFor(ctx){
-  const writes=buildCore(ctx.root,ctx.original),targets=[]
+export function prepareStandardSeams({appDir,operation='install'}={}){
+ if(!['install','uninstall'].includes(operation))throw Error('接缝动作不合法')
+ const ctx=context(appDir),after=new Map(ctx.current),records={},ownedRecords={}
+ if(operation==='install'){
+  // 所有必需锚点在内存中命中完成后才写盘，缺失/歧义不产生半装。
+  const writes=buildCore(ctx.root,ctx.original)
   for(const [rel,body]of writes){
-    if(!maintenanceTargets.includes(rel))throw Error('接线工厂目标未声明：'+rel)
-    parseSeamSource(body,{rel})
-    if(!ctx.original.has(rel)){targets.push({rel,descriptors:[],ownedBody:body});continue}
-    const before=ctx.original.get(rel),descriptors=describeSeamChanges(before,body,{rel,owner:OWNER})
-    if(!descriptors.length)continue
-    const fresh=planSeamInstall(before,{rel,owner:OWNER,descriptors})
-    if(!sameSeamProgram(fresh.source,body,rel))throw Error('局部区块计划丢失或扩大业务修改：'+rel)
-    targets.push({rel,descriptors})
+   if(!maintenanceTargets.includes(rel))throw Error('接缝工厂目标未声明：'+rel)
+   const bridge=ctx.owned.get(rel),current=ctx.current.get(rel)??null
+   if(bridge||!ctx.original.has(rel)){
+    if(current!==null&&!bridge)throw Error('同名文件不属于插件，不能覆盖：'+rel)
+    const wrapped=wrapOwnedFile(body,{rel,owner:OWNER})
+    after.set(rel,bridge?current.slice(0,bridge.start)+wrapped+current.slice(bridge.end):wrapped)
+    ownedRecords[rel]={format:1,owner:OWNER,rel,mode:'owned-new'}
+   }else{
+    const base=ctx.original.get(rel),descriptors=describeSeamChanges(base,body,{rel,owner:OWNER})
+    if(!descriptors.length){after.set(rel,base);continue}
+    let result
+    try{result=planSeamInstall(base,{rel,owner:OWNER,descriptors})}catch(error){error.message=rel+'：'+error.message;throw error}
+    after.set(rel,result.source);records[rel]=result.record
+   }
   }
-  // 新代不再需要的旧区块也撤掉；不以历史目标集合阻止升级。
-  for(const rel of ctx.blocks)if(!targets.some(t=>t.rel===rel))targets.push({rel,descriptors:[]})
-  return targets
-}
-function plan(ctx,targets,operation){
-  const files=new Map(ctx.current)
-  for(const t of targets){
-    const source=ctx.current.get(t.rel)??null,bridge=ctx.bridges.get(t.rel)
-    if(operation==='install'&&t.ownedBody!==undefined){
-      const body=wrapOwnedFile(t.ownedBody,{rel:t.rel,owner:OWNER})
-      if(source!==null&&!bridge)throw Error('已有同名文件不能冒认新建桥：'+t.rel)
-      files.set(t.rel,bridge?source.slice(0,bridge.start)+body+source.slice(bridge.end):body)
-    }else if(source!==null){
-      const next=operation==='install'&&t.descriptors.length?planSeamInstall(source,{rel:t.rel,owner:OWNER,descriptors:t.descriptors}).source:planSeamUninstall(source,{rel:t.rel,owner:OWNER}).source
-      if(bridge&&next==='')files.delete(t.rel);else files.set(t.rel,next)
-    }
+  // 已退役的插件桥与旧自有块按现场撤除，不恢复任何官方原文。
+  for(const [rel,source]of ctx.current)if(!writes.has(rel)){
+   const next=ctx.original.has(rel)?ctx.original.get(rel):planSeamUninstall(source,{rel,owner:OWNER}).source
+   if(ctx.owned.has(rel)&&next==='')after.delete(rel);else after.set(rel,next)
   }
-  return files
+ }else for(const [rel,source]of ctx.current){
+  const next=ctx.original.has(rel)?ctx.original.get(rel):planSeamUninstall(source,{rel,owner:OWNER}).source
+  if(ctx.owned.has(rel)&&next==='')after.delete(rel);else after.set(rel,next)
+ }
+ const changes=maintenanceTargets.filter(rel=>(ctx.current.get(rel)??null)!==(after.get(rel)??null)).map(rel=>({rel,before:ctx.current.get(rel)??null,after:after.get(rel)??null}))
+ const record=operation==='install'?{format:1,owner:OWNER,files:records,owned:ownedRecords}:null
+ return {root:ctx.root,operation,authorVersion:ctx.pkg.version,changes,record,recordBefore:read(ctx.root,COMMENT_SEAMS_RECORD)}
 }
-const sameFiles=(a,b)=>a.size===b.size&&[...a].every(([rel,text])=>b.get(rel)===text)
-function installation(ctx){const targets=targetsFor(ctx),expected=plan(ctx,targets,'install');return {targets,expected,ready:sameFiles(ctx.current,expected)}}
+export function writePreparedStandardSeams(prepared){
+ const written=[],recordFile=safeFile(prepared.root,COMMENT_SEAMS_RECORD)
+ try{
+  for(const item of prepared.changes){
+   const file=safeFile(prepared.root,item.rel);written.push(item)
+   if(item.after===null){if(fs.existsSync(file))fs.unlinkSync(file)}
+   else{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,item.after,'utf8')}
+  }
+  if(prepared.record)fs.writeFileSync(recordFile,JSON.stringify(prepared.record,null,2)+'\n','utf8')
+  else if(fs.existsSync(recordFile))fs.unlinkSync(recordFile)
+ }catch(error){
+  // 仅本次实际写集用于失败恢复，不作准入/卸载文件一致性检查。
+  for(const item of written.reverse()){
+   const file=safeFile(prepared.root,item.rel)
+   if(item.before===null){if(fs.existsSync(file))fs.unlinkSync(file)}else fs.writeFileSync(file,item.before,'utf8')
+  }
+  if(prepared.recordBefore===null){if(fs.existsSync(recordFile))fs.unlinkSync(recordFile)}else fs.writeFileSync(recordFile,prepared.recordBefore,'utf8')
+  throw error
+ }
+ return {changed:prepared.changes.length>0 || prepared.recordBefore !== (prepared.record ? JSON.stringify(prepared.record,null,2)+'\n' : null),ready:true,coverage:'comment-blocks',written:prepared.changes.map(x=>x.rel),authorVersion:prepared.authorVersion,...(prepared.operation==='uninstall'?{legacySeamsRemain:false}:{})}
+}
+export function restorePreparedStandardSeams(prepared){
+ for(const item of [...prepared.changes].reverse()){
+  const file=safeFile(prepared.root,item.rel)
+  if(item.before===null){if(fs.existsSync(file))fs.unlinkSync(file)}else fs.writeFileSync(file,item.before,'utf8')
+ }
+ const file=safeFile(prepared.root,COMMENT_SEAMS_RECORD)
+ if(prepared.recordBefore===null){if(fs.existsSync(file))fs.unlinkSync(file)}else fs.writeFileSync(file,prepared.recordBefore,'utf8')
+}
 export function checkStandardSeams({appDir}={}){
-  const ctx=context(appDir),next=installation(ctx)
-  return {ready:next.ready,coverage:'comment-blocks',needsReapply:!next.ready,pending:next.ready?[]:next.targets.map(t=>t.rel),drifted:[],files:next.targets.map(t=>t.rel)}
+ // 正常启动只看持久自有区块，不重新变换作者代码/做整文件等价比较。
+ const root=path.resolve(appDir),text=read(root,COMMENT_SEAMS_RECORD)
+ if(text===null)return {ready:false,needsReapply:true,coverage:'comment-blocks'}
+ let record;try{record=JSON.parse(text)}catch{return {ready:false,needsReapply:true,coverage:'comment-blocks'}}
+ if(record.owner!==OWNER||!record.files||!record.owned||!record.files['tavern-plugin/lib/index.js']?.blocks?.length)return {ready:false,needsReapply:true,coverage:'comment-blocks'}
+ const pending=[]
+ for(const [rel,info]of Object.entries({...record.files,...record.owned})){
+  const source=read(root,rel)
+  if(source===null){pending.push(rel);continue}
+  const blocks=parseSeamSource(source,{rel,ast:false}).blocks.filter(b=>b.metadata.owner===OWNER)
+  if(info.mode==='owned-new'? !blocks.some(b=>b.metadata.id==='owned-file') : !(info.blocks??[]).every(want=>blocks.some(b=>b.metadata.id===want.id)))pending.push(rel)
+ }
+ return {ready:pending.length===0,needsReapply:pending.length>0,pending,coverage:'comment-blocks'}
 }
-export function inspectStandardSeamsPlan({appDir}={}){
-  try{const ctx=context(appDir),next=installation(ctx);return {ready:next.ready,needsReapply:!next.ready,preflight:'passed',compatible:{ok:true,mode:'comment-blocks',failures:[]},pending:next.ready?[]:next.targets.map(t=>t.rel),authorVersion:ctx.pkg.version}}
-  catch(e){return {ready:false,needsReapply:false,preflight:'failed',reason:e.message,compatible:{ok:false,mode:'comment-blocks',failures:[e.message]}}}
+export function inspectStandardSeamsPlan(options={}){
+ try{const prepared=prepareStandardSeams({...options,operation:'install'});return {ready:prepared.changes.length===0,needsReapply:prepared.changes.length>0,preflight:'passed',compatible:{ok:true,mode:'comment-blocks',failures:[]},authorVersion:prepared.authorVersion}}
+ catch(e){return {ready:false,preflight:'failed',reason:e.message,compatible:{ok:false,failures:[e.message]}}}
 }
-export function applyStandardSeams({appDir,assertStopped,authorUnloaded=false}={}){
-  const ctx=context(appDir),next=installation(ctx)
-  // 全部有限目标一起计划，既清旧区块/摘要又接新代；无缝消失不回历史原文。
-  const byRel=new Map(next.targets.map(t=>[t.rel,t]))
-  const targets=maintenanceTargets.map(rel=>byRel.get(rel)??{rel,descriptors:[]})
-  const result=applyCommentSeams({appDir:ctx.root,owner:OWNER,targets,assertStopped:assertStopped??(authorUnloaded===true?()=>true:undefined),checkReady:({files})=>sameFiles(files,next.expected)})
-  return {...result,ready:true,coverage:'comment-blocks',authorVersion:ctx.pkg.version}
+export function applyStandardSeams({assertStopped,authorUnloaded=false,...options}={}){
+ if(assertStopped?assertStopped()!==true:!authorUnloaded)throw Error('施缝时作者须已停止或尚未加载')
+ return writePreparedStandardSeams(prepareStandardSeams({...options,operation:'install'}))
 }
-export function uninstallStandardSeams({appDir,assertStopped,authorUnloaded=false}={}){
-  const ctx=context(appDir),targets=maintenanceTargets.map(rel=>({rel,descriptors:[]})),expected=plan(ctx,targets,'uninstall')
-  const result=applyCommentSeams({appDir:ctx.root,owner:OWNER,targets,operation:'uninstall',assertStopped:assertStopped??(authorUnloaded===true?()=>true:undefined),checkReady:({files})=>sameFiles(files,expected)})
-  return {...result,requiresRestart:result.changed,restored:'onsite-comment-prefix',recordKept:false,legacySeamsRemain:false}
+export function uninstallStandardSeams({assertStopped,authorUnloaded=false,...options}={}){
+ if(assertStopped?assertStopped()!==true:!authorUnloaded)throw Error('撤缝时作者须已停止或尚未加载')
+ return {...writePreparedStandardSeams(prepareStandardSeams({...options,operation:'uninstall'})),restored:'onsite-comment-prefix',recordKept:false}
 }

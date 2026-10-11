@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-sqlite-v2",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "type": "module",
   "description": "V2 完整功能版本线：SQLite权威存储与干净回退，保留当前服务端MVU、卡脚本执行和分类能力；原档只读、用户手动新ID分叉",
@@ -74,6 +74,8 @@
     }
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.5-rc.2 <0.2.0",
     "@deepseek-ai/dsh-session-persistence": ">=0.1.5-rc.2 <0.2.0",
     "@deepseek-ai/dsh-session-persistence-jsonl": ">=0.1.5-rc.2 <0.2.0",
     "@deepseek-ai/dsh-session-query": ">=0.1.5-rc.2 <0.2.0"

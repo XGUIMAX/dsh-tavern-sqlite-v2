@@ -190,7 +190,7 @@ function assertBootstrapManifestComplete(root) {
     }
   }
 }
-export function createStandardInstallation({ op, adapter, packageRoot, evidence, linkPeers = () => {} }) {
+export function createStandardInstallation({ op, adapter, packageRoot, evidence, linkPeers = () => {}, simple = false }) {
   const name = adapter.packageName, pluginDir = pluginDirFor({ home: op.home, packageName: name })
   const link = path.join(op.profileDir, 'node_modules', name), oldDir = path.join(op.home, 'plugins', name)
   const profileFile = path.join(op.profileDir, 'package.json'), patchFile = path.join(op.profileDir, 'cordis.patch.yml')
@@ -286,7 +286,7 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
   }
   async function manage(action, root = incoming) {
     if (!['install', 'uninstall'].includes(action)) throw Error('标准装配动作必须是 install/uninstall')
-    capture(); assertUnchanged()
+    capture(); if (!simple) assertUnchanged()
     // 直连 manage 也必须看见磁盘上的用户冲突（不依赖调用方传入 text，也不依赖先跑 preflight）：
     // 拒绝发生在任何 clearCurrent/writeState 之前 ⇒ 零写。
     if (action === 'install') assertNoOrdinaryOverrideConflict(parsePatch(bytes(patchFile)?.toString('utf8') ?? '[]'))
@@ -316,13 +316,15 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
     if (stat(pluginDir)) throw Error('标准安装目的已存在，拒绝覆盖')
     currentDir = pluginDir
     copyPackage(source, pluginDir)
-    const bootstrap = json(path.join(pluginDir, 'bootstrap', 'package.json'))
-    if (bootstrap.dsh?.client || bootstrap.name === name) throw Error('启动入口不得拥有第二个浏览器来源')
+    if (!simple) {
+      const bootstrap = json(path.join(pluginDir, 'bootstrap', 'package.json'))
+      if (bootstrap.dsh?.client || bootstrap.name === name) throw Error('启动入口不得拥有第二个浏览器来源')
+    }
     await linkPeers(json(path.join(pluginDir, 'package.json')), pluginDir)
     const installed = installOwnedRows(text, { pluginDir, home: op.home })
     writeState(expected.profile, Buffer.from(installed.text ?? text ?? '[]\n'))
-    if (!samePackage(source, pluginDir)) throw Error('标准目录程序与本次选定程序不一致')
-    return assertAssembly('install')
+    if (!simple && !samePackage(source, pluginDir)) throw Error('标准目录程序与本次选定程序不一致')
+    return simple ? { present: true, layout: 'standard', dir: pluginDir } : assertAssembly('install')
   }
   function assertAssembly(action) {
     const now = inspect()
@@ -337,12 +339,12 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
   }
   async function preflight(action) {
     if (!['install', 'uninstall'].includes(action)) throw Error('标准装配动作必须是 install/uninstall')
-    if (captured) assertUnchanged()
+    if (captured && !simple) assertUnchanged()
     for (const file of [...paths, profileFile, patchFile]) assertSafe(file, op.home)
-    state = inspect(); capture()
+    state = simple ? { present: !!stat(pluginDir), layout: stat(pluginDir) ? 'standard' : 'absent', dir: stat(pluginDir) ? pluginDir : null } : inspect(); capture()
     // 本包自有清单完整性：标准目录/持久装配变更之前先拒（缺非空 name/version 的启动入口清单会让
     // 装配后的首个请求在宿主请求扩展准备期失败）。只判输入包根；copyPackage 逐字节复制，故无需再判 incoming。
-    if (action === 'install') assertBootstrapManifestComplete(packageRoot)
+    if (action === 'install' && !simple) assertBootstrapManifestComplete(packageRoot)
     // 用户配置冲突（普通入口行 disabled / 顶层 override 带接线键）与现场是否已装无关：
     // 首装（state.absent）也必须响亮拒绝，不能"看不见"就静默 reset 用户显式配置。此处仍零写。
     if (action === 'install') {
@@ -355,7 +357,7 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
     else uninstallOwnedRows(expected.patch?.toString('utf8'), { pluginDir })
     if (action === 'install' && state.present) {
       const { samePackage, copyPackage } = await import('./runner.mjs')
-      state.upgrading = state.layout !== 'standard' || !samePackage(packageRoot, state.dir)
+      state.upgrading = simple || state.layout !== 'standard' || !samePackage(packageRoot, state.dir)
       // 普通入口缺席/坏入口（旧 044 仅 early、或归属/唯一/入口丢失）同样是**升级**，不能因 samePackage=true 就 noop。
       const ordinary = state.ordinary ?? { ok: false, reason: 'absent' }
       if (ordinary.ok !== true) {
@@ -372,7 +374,7 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
   }
   async function restore() {
     if (!captured) return
-    assertUnchanged(); clearCurrent()
+    if (!simple) assertUnchanged(); clearCurrent()
     for (const item of [...moves].reverse()) {
       const archived = stat(item.dest)
       if (stat(item.file) || !archived || archived.isSymbolicLink() !== item.symbolic
@@ -388,7 +390,7 @@ export function createStandardInstallation({ op, adapter, packageRoot, evidence,
     writeState(before.profile, before.patch)
     restored = true
     // 残留维护允许原本就是半装的状态；恢复只要求本次归档和配置回原位，不能用完整安装准入拒绝原状态。
-    return state?.layout === 'residual' ? state : inspect()
+    return simple || state?.layout === 'residual' ? state : inspect()
   }
   function residual() {
     capture(); assertUnchanged()

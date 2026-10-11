@@ -6,7 +6,7 @@ const VIEW_MARKER = '// [dsh-tavern-latest-failure-view:v1]'
 // R1 冷普通回退证据：宿主 DI 用 **SDK 真 fold** 派生当前模型面 seq 列表（唯一权威仍是 events）。
 // `sessionQuery.observeSession` 真身（SessionObservationReader.preparedLease/live）不公开 surface/nodes，
 // 作者nodes是有序模型面，不能把按seq排序的current记录集合冒充顺序；直接消费SDK的真实fold.nodes。
-const EVIDENCE_FOLD_LINE = "import { foldSurface as foldSurfaceForEvidence } from '@deepseek-ai/dsh-session'\n"
+const EVIDENCE_FOLD_LINE = "import { foldSurfaceForEvidence } from './domain/storage-failure-state.js'\n"
 // 作者 2.5 `rollbackViewFields` 里**唯一一行**节点推导；冷档（无 session）改用证据节点，live 仍走 session.surface.nodes。
 const AUTHOR_NODES_LINE = 'const nodes = session?.surface?.nodes\n'
 const AUTHOR_NODES_NEXT = 'const nodes = session?.surface?.nodes ?? evidence.nodes\n'
@@ -96,9 +96,17 @@ function upgradeVolatileEvidenceHost(source) {
   return source
 }
 function addIdleSignals(source) {
-  const old='const settlementJobs = createSettlementJobs({ run: runSettlement, onSettled: onSettlementSettled })'
-  const next="const settlementJobs = createSettlementJobs({ run: runSettlement, onSettled: onSettlementSettled, onIdle: chatId => { void taskStateReader.read(chatId).then(chat => { if (chat) sessionSignals.publish(chat.sessionId, {kind:'tavern-state',version:'cleanup-idle:' + Date.now()}) }).catch(error => console.warn('dsh-tavern: 结算静止通知失败', error)) } })"
+  const runners=['runSettlementCycle','runSettlement'].filter(run=>source.includes('createSettlementJobs({ run: '+run+', onSettled: onSettlementSettled'))
+  if(runners.length!==1)throw Error('结算静止入口缺失/不唯一')
+  const run=runners[0]
+  const old='const settlementJobs = createSettlementJobs({ run: '+run+', onSettled: onSettlementSettled })'
+  const next='const settlementJobs = createSettlementJobs({ run: '+run+", onSettled: onSettlementSettled, onIdle: chatId => { void taskStateReader.read(chatId).then(chat => { if (chat) sessionSignals.publish(chat.sessionId, {kind:'tavern-state',version:'cleanup-idle:' + Date.now()}) }).catch(error => console.warn('dsh-tavern: 结算静止通知失败', error)) } })"
   if(!source.includes(next))source=once(source,old,next)
+  if(source.includes('  const pluginTaskJobs = new Map()')) {
+    const oldBusy='const backgroundActive = settlementJobs.isBusy(chatId) === true;'
+    const newBusy='const backgroundActive = settlementJobs.isBusy(chatId) === true || pluginTaskJobs.has(chatId);'
+    if(!source.includes(newBusy))source=once(source,oldBusy,newBusy)
+  }
   const anchor='    turns: turnOrchestrator,',withIdle=anchor+"\n    onIdle: sessionId => sessionSignals.publish(sessionId, {kind:'tavern-state',version:'cleanup-idle:' + Date.now()}),"
   if(!source.includes(withIdle))source=once(source,anchor,withIdle)
   return upgradeVolatileEvidenceHost(source)
@@ -113,7 +121,7 @@ export function applyLatestFailureHostTransform(source) {
     if (source.split(HOST_MARKER).length !== 2 || !(source.includes(after) || source.includes(afterNew)) || !source.includes(EVIDENCE_IMPORT)
       || !(source.includes(EVIDENCE_CALL_AFTER) || source.includes(EVIDENCE_CALL_AFTER_LEGACY))) throw new Error('最新失败宿主接线不完整')
     // 已 marked 的旧代证据读口（无真 fold 推导/无静止证明）必须**可升级**，不能只判"不完整"就拒。
-    if (source.includes(EVIDENCE_METHOD) && source.includes(EVIDENCE_FOLD_LINE)) return addIdleSignals(source)
+    if ((source.includes(EVIDENCE_METHOD) || source.includes(EVIDENCE_METHOD.replace('const backgroundActive = settlementJobs.isBusy(chatId) === true;', 'const backgroundActive = settlementJobs.isBusy(chatId) === true || pluginTaskJobs.has(chatId);'))) && source.includes(EVIDENCE_FOLD_LINE)) return addIdleSignals(source)
     if (source.includes(EVIDENCE_METHOD_V1)) {
       const upgradedV1 = once(source, EVIDENCE_METHOD_V1, EVIDENCE_METHOD)
       return addIdleSignals(once(upgradedV1, EVIDENCE_CALL_AFTER_LEGACY, EVIDENCE_CALL_AFTER))

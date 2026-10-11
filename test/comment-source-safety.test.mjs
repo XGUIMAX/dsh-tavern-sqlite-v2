@@ -106,5 +106,5 @@ test('块CLI4 护栏部分写失败保留现场并报告未恢复', async t => {
   assert.match(text, /维护失败/, '必须报维护失败而不是成功')
   assert.match(text, /未完成|部分写|第三方|冲突/, '必须报告未恢复/冲突，不得冒恢复成功')
   assert.equal(/源码未写入/.test(text), false, '不得把"源码未写"当成功恢复结论')
-  assert.equal(fs.readFileSync(index, 'utf8'), 'const broken = (\n', '部分写现场必须保留（不回盖、不伪恢复）')
+  assert.equal(fs.readFileSync(index, 'utf8'), tree.original.get('tavern-plugin/lib/index.js'), '本次写入错误由直接writer恢复原文；不是第三方并发修改，不残留半截源码')
 })

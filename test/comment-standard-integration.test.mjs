@@ -29,7 +29,7 @@ test('块产品2 旧机制拒与无记录现场区块可撤', async (t) => {
   // ① 旧机制记录残留 ⇒ 旧 CLI 语义拒绝、零写
   const first = fresh(), firstBefore = snapshot(first.appDir)
   writeFileSync(path.join(first.appDir, '.tavern-standard-seams.json'), '{}\n', 'utf8')
-  assert.throws(() => applyStandardSeams({ appDir: first.appDir, assertStopped: () => true }), /旧机制记录/)
+  assert.throws(() => applyStandardSeams({ appDir: first.appDir, assertStopped: () => true }), /旧机制接缝/)
   identical(snapshot(first.appDir), firstBefore, '旧记录拒绝必须零写')
 
   // ② 有自有块、记录缺失（记录删/换代）⇒ 允许按**现场块**处理：install 幂等零写、uninstall 允许

@@ -1,6 +1,7 @@
 // 核心消费者的作者2.4薄接线；仅纯文本转换，不访问存档/启动服务。
 import { applyClientHistoryAuthorityTransform } from './client-history-authority-transform.mjs'
 import { applyAuthorRollbackSyncTransform } from './rollback-sync-author-transform.mjs'
+import { parse } from '../lib/vendor/acorn/acorn.mjs'
 export const CORE_HOST_MARKER = '// [dsh-tavern-core-host:v1]'
 function once(text, before, after, label) {
   const count = text.split(before).length - 1
@@ -185,16 +186,32 @@ export function applyHelperCurrentTransform(source) {
 export function applyBudgetTransform(source, target) {
   const marker = '// [dsh-tavern-core-budget:v1:' + target + ']'
   if (source.includes(marker)) return source
+  // 定位真实声明而非旧默认数值；词法伪文本不算，唯一性和数值声明形态仍强制。
+  const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true })
+  const candidates = []
+  const numeric = node => node?.type === 'Literal' && typeof node.value === 'number' && Number.isFinite(node.value)
   if (target === 'dispatch') {
-    return "import { BUDGETS } from './storage-budgets.js'\n" + marker + '\n' + once(source,
-      'export const TAVERN_SCRIPT_CLAIM_TIMEOUT_MS = 30000',
-      'export const TAVERN_SCRIPT_CLAIM_TIMEOUT_MS = BUDGETS.scriptClaimMs', '浏览器UI脚本认领预算')
-  }
-  if (target === 'template') {
-    return "import { BUDGETS } from './storage-budgets.js'\n" + marker + '\n' + once(source,
-      'timeoutMs = 120000, idleMs = 600000', 'timeoutMs = BUDGETS.serverTemplateMs, idleMs = 600000', '服务端模板预算')
-  }
-  throw new Error('未知预算消费者：' + target)
+    for (const node of ast.body) {
+      const declaration = node.type === 'ExportNamedDeclaration' && node.declaration
+      if (declaration?.type !== 'VariableDeclaration' || declaration.kind !== 'const') continue
+      for (const item of declaration.declarations) if (item.id.type === 'Identifier' && item.id.name === 'TAVERN_SCRIPT_CLAIM_TIMEOUT_MS' && numeric(item.init)) candidates.push(item.init)
+    }
+  } else if (target === 'template') {
+    const visit = node => {
+      if (!node || typeof node !== 'object') return
+      if (node.type === 'ObjectPattern') {
+        const timeout = node.properties.filter(p => p.type === 'Property' && !p.computed && p.key.name === 'timeoutMs' && p.value.type === 'AssignmentPattern' && p.value.left.name === 'timeoutMs' && numeric(p.value.right))
+        const idle = node.properties.some(p => p.type === 'Property' && !p.computed && p.key.name === 'idleMs' && p.value.type === 'AssignmentPattern' && p.value.left.name === 'idleMs' && numeric(p.value.right))
+        if (idle) for (const item of timeout) candidates.push(item.value.right)
+      }
+      for (const value of Object.values(node)) if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value === 'object') visit(value)
+    }
+    visit(ast)
+  } else throw new Error('未知预算消费者：' + target)
+  const label = target === 'dispatch' ? '浏览器UI脚本认领预算' : '服务端模板预算'
+  if (candidates.length !== 1) throw new Error('核心接入锚点不唯一：' + label + '（' + candidates.length + '）')
+  const node = candidates[0], value = target === 'dispatch' ? 'scriptClaimMs' : 'serverTemplateMs'
+  return "import { BUDGETS } from './storage-budgets.js'\n" + marker + '\n' + source.slice(0, node.start) + 'BUDGETS.' + value + source.slice(node.end)
 }
 export function applyClientRollbackTransform(source) {
   return applyClientHistoryAuthorityTransform(applyAuthorRollbackSyncTransform(source))

@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 const json = file => JSON.parse(readFileSync(file, 'utf8'))
-export function options(argv, { cwd = process.cwd(), env = process.env, userHome = os.homedir() } = {}) {
+export function options(argv, { cwd = process.cwd(), env = process.env, userHome = os.homedir(), platform = process.platform } = {}) {
   const out = { action: argv[0] || 'install', profile: 'tavern' }
   for (let i = 1; i < argv.length; i++) {
     const key = argv[i]
@@ -34,6 +34,13 @@ export function options(argv, { cwd = process.cwd(), env = process.env, userHome
   if (candidates.length !== 1) throw Error(candidates.length ? '发现多个安装目录，请显式--home选择一个；不猜实例' : '未找到已有酒馆，请指定--home；不自动安装第二套酒馆')
   out.home = candidates[0]
   const profileDir = path.join(out.home, 'profiles', out.profile), linked = path.join(profileDir, 'node_modules', 'dsh-tavern-plugin')
+  if (platform === 'linux') {
+    // 直接定位当前酒馆目录；不要求作者profile解析链接或宿主清单可用。
+    const roots = out.app ? [path.resolve(cwd, out.app)] : [path.join(out.home, 'apps', 'dsh-tavern'), out.home, cwd]
+    const app = [...new Set(roots)].find(root => existsSync(path.join(root, 'tavern-plugin', 'package.json')))
+    if (!app) throw Error('未定位到酒馆目录，请指定--app')
+    return { ...out, app, profileDir, host: 'cli', simpleMaintenance: true }
+  }
   if (!existsSync(linked)) throw Error('目标profile未安装作者酒馆包')
   const authorRoot = realpathSync(linked)
   if (path.basename(authorRoot) !== 'tavern-plugin') throw Error('不支持的作者安装布局')
@@ -253,6 +260,11 @@ export function runtimeFor(op, { platform = process.platform } = {}) {
   if (op.host === 'desktop') return desktopRuntimeFor(op)
   if (platform === 'win32') return windowsCliRuntimeFor(op)
   const root = path.join(op.home, 'runtime', 'lib', 'node_modules', '@deepseek-ai'), cli = path.join(op.home, 'runtime', 'bin', 'dsh')
+  if (op.simpleMaintenance || platform === 'linux') {
+    // Linux装卸只定位原CLI，既有宿主版本/能力/模块解析不作为资格门。
+    const entry = existsSync(cli) ? realpathSync(cli) : cli
+    return { cli, cliEntries: [...new Set([cli, entry])] }
+  }
   const pkg = json(path.join(root, 'dsh', 'package.json')), boot = json(path.join(root, 'dsh-app-boot', 'package.json'))
   if (op.action !== 'uninstall' && (pkg.version !== '0.1.5-rc.2' || boot.version !== '0.1.5-rc.2')) throw Error('只支持已适配DSH/boot 0.1.5-rc.2，不自动改宿主版本')
   const entry = realpathSync(cli), anchor = path.join(root, 'dsh', 'package.json'), require = createRequire(anchor)

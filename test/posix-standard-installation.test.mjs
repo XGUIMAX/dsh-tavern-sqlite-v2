@@ -86,5 +86,5 @@ test('POSIX标准装配：现装无profile链接仍预检幂等且失败恢复�
   assert.deepEqual(read(path.join(profileDir, 'package.json')), before.profile, 'profile 字节还原')
   assert.deepEqual(read(path.join(profileDir, 'cordis.patch.yml')), before.patch, 'patch 字节还原')
   assert.deepEqual(read(path.join(runtimeLib, 'node_modules', ...peers[0].split('/'), 'package.json')), before.sdk, '合成 SDK 不得被改')
-  assert.ok(probes.length >= 2, '预检仍走既有能力探针调用路径（runPackage 为合成桩，不冒充真探针）')
+  assert.equal(probes.length, 0, 'Linux预检不再调用宿主能力探针，包位置/profile恢复仍沿真实装配')
 })

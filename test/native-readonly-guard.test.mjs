@@ -1,13 +1,20 @@
 // 最小闸：原档 native 浏览只读，跳过自动 promotion 且释放 owned lease；显式 fork 冷读不改。
 // 只依赖 Node 内置；node test/native-readonly-guard.test.mjs
+import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { inject, installNativeReadonlyGuard, apply } from '../host-patch.js'
+import { createRequire, registerHooks } from 'node:module'
+import { pathToFileURL } from 'node:url'
+const runtimeRequire=createRequire(path.join(process.env.DSH_TAVERN_TEST_DESKTOP_RUNTIME || 'D:/Program Files (x86)/DSH-Tavern/runtime-9be856025c1522cb-setup7-5ae29095747f4f4a9fc3f12a68611fd7/resources/app','package.json'))
+const sessionModuleUrl=pathToFileURL(runtimeRequire.resolve('@deepseek-ai/dsh-session')).href
+registerHooks({resolve(spec,context,next){return spec==='@deepseek-ai/dsh-session'?next(sessionModuleUrl,context):next(spec,context)}})
+const { inject, installNativeReadonlyGuard, apply } = await import('../host-patch.js')
 import { isLegacySession, UNMIGRATED_MESSAGE } from '../lib/tavern-chat-state.js'
 import { setLegacyBinding } from '../lib/legacy-bindings.js'
 
+test('原档native只读守卫：真宿主SDK依赖下拒写与释放租约并恢复方法',async()=>{
 const root = mkdtempSync(path.join(os.tmpdir(), 'tavern-native-readonly-guard-'))
 const oldHome = process.env.DSH_HOME
 const writeJson = (file, value) => {
@@ -157,3 +164,4 @@ try {
   // 只删除本测试独占 mkdtemp 子目录，不清共享临时根。
   rmSync(root, { recursive: true, force: true })
 }
+})

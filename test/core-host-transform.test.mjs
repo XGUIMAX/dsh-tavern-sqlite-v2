@@ -23,7 +23,7 @@ assert.ok(!transformed.includes("owner: chat.mvu.owner === 'official' ? 'officia
 const dispatch = applyBudgetTransform('export const TAVERN_SCRIPT_CLAIM_TIMEOUT_MS = 30000', 'dispatch')
 assert.equal(applyBudgetTransform(dispatch, 'dispatch'), dispatch)
 assert.ok(dispatch.includes('BUDGETS.scriptClaimMs'))
-assert.ok(applyBudgetTransform('timeoutMs = 120000, idleMs = 600000', 'template').includes('BUDGETS.serverTemplateMs'))
+assert.ok(applyBudgetTransform('function runtime({timeoutMs = 120000, idleMs = 600000}) {}', 'template').includes('BUDGETS.serverTemplateMs'))
 // —— 客户端 resync 段（2.5.0 上**无法成立**，本节按"只报不改"降级为显式声明，不静默绿）——
 // 事实（2026-10-05 核实）：产品 deploy/rollback-sync-author-transform.mjs:34 用 once() 要求
 // `historyProjection.rolledBack(props.sessionId, result && result.view);` 在文件中**恰好出现 1 次**。

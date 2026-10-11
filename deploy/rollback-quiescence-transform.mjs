@@ -19,7 +19,17 @@ export function applySettlementQuiescenceTransform(source) {
  * 幂等：已带成员则原样返回；`return Object.freeze({ start, cancel, dispose })` 缺/重一律响亮拒（不猜作者布局）。
  */
 function addSettlementIsBusy(source) {
-  if (!source.includes('isBusy: chatId => jobs.has(chatId)')) source=once(source, '  return Object.freeze({ start, cancel, dispose })', '  return Object.freeze({ start, cancel, dispose, isBusy: chatId => jobs.has(chatId) })')
+  if (!source.includes('isBusy: chatId => jobs.has(chatId)')) {
+    // 布局兼容：旧 `{ start, cancel, dispose }` 与新上游 7e349 `{ start, pending, cancel, dispose }`；
+    // 两者**恰有一**命中才注入（保留 pending 与作者其余成员，绝不改回作者 run/取消语义）。
+    const layouts=[
+      '  return Object.freeze({ start, pending, cancel, dispose })',
+      '  return Object.freeze({ start, cancel, dispose })',
+    ]
+    const hits=layouts.filter(layout=>source.split(layout).length===2)
+    if(hits.length!==1)throw new Error('结算静止接缝返回锚点未命中/不唯一（旧/新布局恰需其一）：'+layouts.join(' | '))
+    source=once(source,hits[0],hits[0].replace(', dispose })',', dispose, isBusy: chatId => jobs.has(chatId) })'))
+  }
   if(!source.includes('onIdle = () => {}')) {
     source=once(source,'createSettlementJobs({ run, onSettled })','createSettlementJobs({ run, onSettled, onIdle = () => {} })')
     source=once(source,'finally { if (jobs.get(chatId) === job) jobs.delete(chatId) }','finally { if (jobs.get(chatId) === job) { jobs.delete(chatId); if (!disposed) onIdle(chatId) } }')

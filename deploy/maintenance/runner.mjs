@@ -12,6 +12,7 @@ import { options, runtimeFor, assertTargetAllowed, packagePolicyArgs } from './t
 import { createDriver } from './driver.mjs'
 import { describeError } from './environment.mjs'
 import { sourceAccess, assertPackageSource, assertSourceUninstalled, rehearseSource, sameImage } from './source.mjs'
+import { createLinuxDriver } from './linux-driver.mjs'
 export { options, packagePolicyArgs }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 export function packageFiles(root) {
@@ -55,6 +56,7 @@ function report(adapter, action, wasRunning, extra) {
 }
 
 export async function executeMaintenance({ action, adapter, driver, source, evidenceDir, progress = () => {}, budget = maintenanceBudget(), prepareEnv = false }) {
+  if (driver.simpleMaintenance) return executeSimpleMaintenance({ action, adapter, driver, appDir: source.root, progress })
   const step = async (name, fn) => { budget.remaining(); progress(name); const value = await fn(); budget.remaining(); return value }
   let safeToRestore = false, stopAttempted = false, baseline = null, expected = null, operationBefore = null, sourceTouched = false, newProcess = null, result = null, state = null, validation = null
   try {
@@ -167,8 +169,35 @@ export async function executeMaintenance({ action, adapter, driver, source, evid
   }
 }
 
+// Linux简单路径：一次命中，停止，直接区块写入/程序复制，恢复原状态。
+export async function executeSimpleMaintenance({ action, adapter, driver, appDir, check = false, progress = () => {} }) {
+  const started = performance.now()
+  const state = await driver.preflight(action)
+  progress('一次定位接缝（不做隔离预演/文件一致性或环境能力检查）')
+  const prepared = adapter.prepareStandardSeams({ appDir, operation: action })
+  if (check) return report(adapter, action, state.wasRunning, { changed: false, check: true, pending: prepared.changes.map(x => x.rel), elapsedMs: Math.round(performance.now() - started) })
+  let stopAttempted = false, sourceWritten = false, assemblyAttempted = false, result
+  try {
+    if (state.wasRunning) { stopAttempted = true; progress('按原管理方式停止'); await driver.stop() }
+    progress(action === 'install' ? '注入区块并注释原代码' : '撤除自有区块并解除原代码注释')
+    result = adapter.writePreparedStandardSeams(prepared); sourceWritten = true
+    progress(action === 'install' ? '复制插件目录并写加载入口' : '移除插件目录和自有加载入口')
+    assemblyAttempted = true; await driver.manage(action)
+    if (state.wasRunning) { progress('按原管理方式恢复启动'); await driver.start() }
+  } catch (error) {
+    let recoveryError
+    if (assemblyAttempted) { try { await driver.restorePackage() } catch (recovery) { recoveryError = recovery } }
+    if (sourceWritten) { try { adapter.restorePreparedStandardSeams(prepared) } catch (recovery) { recoveryError ??= recovery } }
+    if (stopAttempted) { try { await driver.start() } catch (recovery) { recoveryError ??= recovery } }
+    if (recoveryError) throw new AggregateError([error, recoveryError], '装卸失败且恢复未完成')
+    throw error
+  }
+  return report(adapter, action, state.wasRunning, { changed: true, verificationScope: 'direct-seams-copy', runtimeVerified: false, elapsedMs: Math.round(performance.now() - started), seams: result })
+}
+
 /** CLI 与回归共用同一只读检查分支：证据副本可写，目标源码/profile 不写。 */
 export async function checkMaintenance({ action, adapter, driver, source, evidenceDir, budget = maintenanceBudget() }) {
+  if (driver.simpleMaintenance) return executeSimpleMaintenance({ action, adapter, driver, appDir: source.root, check: true })
   const state = await driver.preflight(action)
   assertPackageSource(source, adapter, { allowRebase: action === 'install' })
   const base = { initialState: state.wasRunning ? 'running' : 'stopped', check: true, changed: false }
@@ -206,17 +235,18 @@ export function runCli(url, adapter) {
   if (!process.argv[1] || path.resolve(process.argv[1]) !== fileURLToPath(url)) return
   const main = async () => {
     if (process.argv.includes('--help')) {
-      console.log(`${adapter.packageName} 离线装卸（注释块机制；Windows/macOS/Linux/WSL2 CLI）\nnode deploy/maintenance.mjs install|uninstall [--home <已有安装目录>] [--desktop-app <嵌入式DSH Desktop安装根>] [--port <核对端口>] [--systemd-unit <既有单元>] [--prepare-env] [--check] [--background]\n默认apply；本地完整包不联网、不索取网页凭证、不复制依赖/存档。安装与卸载同一执行序列：预检→本次有限副本预演→精确停止→标准插件目录和持久启动行装卸→按现场区块施缝/撤缝→本次回读→按原方式启服→验收；失败只回滚本次前像，第三方改过不回盖。\n块机制与旧机制不并存：现场存在旧记录（.tavern-seams.json/.tavern-legacy-view-seams.json/.tavern-save-ui-seam.json）或旧接缝代码但无块记录时直接拒绝，请先用旧版插件完成卸载。卸载无需旧恢复资产：无块无记录（撤净态）时只移除装配，源码零写。\nLinux/macOS运行中停止后按原方式恢复，原本停止则保持停止；Windows CLI/桌面不自动停启：请自行完整停止再装卸，成功后自行启动；运行/身份不明拒绝写入。包就绪后180秒成功预算；异常恢复独立处理。网页/真实玩法由用户确认。\nV2运行中目标须已带--experimental-vm-modules；默认不改启动配置。--prepare-env（仅install）显式授权补VM旗标（备份原unit、失败自动回滚）。四个解析依赖与acorn须离线可用，不补装宿主peer、不联网补依赖。`)
+      console.log(`${adapter.packageName} 离线装卸（现场注释区块）\nnode deploy/maintenance.mjs install|uninstall [--home <酒馆目录>] [--port <目标端口>] [--systemd-unit <已有单元>] [--check] [--background]\nLinux/WSL2：定位目录→一次命中全部必需接缝→原运行者停止→直接注入/撤除自有区块→复制/移除插件目录和加载入口→按原方式恢复。原本停止则保持停止；完整原argv/cwd/env保留，systemd配置不改。\n不做隔离预演、官方/整文件一致性认证、重复计划/回读验收、宿主版本/VM能力/参数白名单或HTTP功能检查；不补VM旗标，不设180/600秒成功预算。--prepare-env在Linux仅作旧参数兼容，不修改环境。\n卸载只剥现场ORIGINAL最外面一层//，保用户ORIGINAL及块外修改。旧机制首次转换仍先用所属旧CLI卸载，缺失/歧义的必需锚点或半截块在源码写入前拒绝。\nWindows桌面/CLI与macOS仍走既有平台维护路径；Windows须自行完整停止后装卸，成功后自行启动。嵌入式桌面可加--desktop-app <安装根>。不联网补SDK、不访问存档，运行兼容与页面/玩法按Release说明由用户确认。`)
       return
     }
     if (!['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('不支持的平台：' + process.platform)
     const op = options(process.argv.slice(2)); assertTargetAllowed(op)
+    op.simpleMaintenance = process.platform === 'linux' && op.host === 'cli'
     // 原生 Windows 桌面与 CLI 都只维护停止态：各自验证实际宿主，绝不认领 POSIX 启停身份。
     if (process.platform === 'win32' && op.host === 'cli' && (op['systemd-unit'] || op['prepare-env'])) {
       throw Error('Windows CLI 不接管 systemd 或启动配置；请自行 dsh-tavern stop 后维护，不使用 --prepare-env')
     }
     // 每次Node交接的启动/import/目录识别也算入共享时间，不在worker入口重新从零计时。
-    const budget = maintenanceBudget({ milliseconds: successBudgetMs(op.host), elapsed: Number(op.elapsed || 0) + performance.now() }), root = path.dirname(path.dirname(fileURLToPath(url))), runtime = runtimeFor(op)
+    const budget = maintenanceBudget({ milliseconds: op.simpleMaintenance ? Infinity : successBudgetMs(op.host), elapsed: Number(op.elapsed || 0) + performance.now() }), root = path.dirname(path.dirname(fileURLToPath(url))), runtime = runtimeFor(op)
     budget.remaining()
     packageFiles(root)
     const evidence = op.evidence ? path.resolve(op.evidence) : path.join(op.home, 'maintenance', adapter.packageName, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID())
@@ -246,6 +276,16 @@ export function runCli(url, adapter) {
       process.once('SIGINT', detach); process.once('SIGTERM', detach)
       const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })
       process.removeListener('SIGINT', detach); process.removeListener('SIGTERM', detach); process.exitCode = code ?? 1; return
+    }
+    if (op.simpleMaintenance) {
+      const driver = createLinuxDriver(op, adapter, root, evidence)
+      const start = performance.now(), progress = text => console.log(Math.round(performance.now() - start) + 'ms ' + text)
+      try {
+        const result = await executeSimpleMaintenance({ action: op.action, adapter, driver, appDir: op.app, check: !!op.check, progress })
+        writeFileSync(reportFile(), JSON.stringify({ ok: true, network: 'offline', ...result }, null, 2) + '\n', 'utf8')
+        console.log(JSON.stringify({ ok: true, ...result })); console.log('结果：' + reportFile())
+      } catch (error) { reportMaintenanceFailure(error, evidence, Math.round(performance.now() - start), console.log, reportDir); throw error }
+      return
     }
     const { withFileLock } = await import(runtime.atomicUrl)
     await withFileLock(path.join(op.home, 'maintenance', op.profile + '-plugin-operation'), async () => {

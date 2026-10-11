@@ -1,9 +1,9 @@
 #!/bin/sh
 # 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
 set -eu
-RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.6/dsh-tavern-sqlite-v2-0.4.6.tgz'
-RELEASE_SHA256='eaa5ee6b5d4410e490875470ee9966d11eb06d64b1b2cadf3c4ec8ebbec757f2'
-VERSION='0.4.6'
+RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.7/dsh-tavern-sqlite-v2-0.4.7.tgz'
+RELEASE_SHA256='265ccd8c4de0fab76dc608676a0d965d67a33860a55417de41a8c7512bb689e9'
+VERSION='0.4.7'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
@@ -14,7 +14,7 @@ export DSH_STORAGE_RELEASE_SHA256="${DSH_STORAGE_RELEASE_SHA256:-$RELEASE_SHA256
 export DSH_STORAGE_RELEASE_VERSION="$VERSION"
 command -v node >/dev/null 2>&1 || { echo '需要已有酒馆使用的Node.js 22.19+；本脚本不另装运行时。' >&2; exit 1; }
 node --input-type=module - "$@" <<'DSH_STORAGE_BOOTSTRAP'
-// SH内嵌的零依赖获取器；仅缺安装包时联网，获取完成后才进入安装180秒预算。
+// SH内嵌的零依赖获取器；仅缺安装包时联网，获取后进入对应平台维护入口。
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -105,6 +105,11 @@ function maintenanceAssets(root) {
 }
 export function validatePackage(root) {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+  if (process.platform === 'linux') {
+    // 获取器只确认选中本插件及执行入口，不检查酒馆环境/模块链接/文件一致性。
+    if (manifest.name !== NAME || !fs.existsSync(path.join(root, 'deploy', 'maintenance.mjs'))) throw Error('未找到本插件安装入口')
+    return manifest
+  }
   const declared = Object.keys(manifest.dependencies || {})
   // 零运行时依赖：lodash/yaml/json5/jsonrepair 已 vendor 进包内，任何声明依赖都拒绝（供应链政策不放宽）。
   if (manifest.name !== NAME || declared.length > 0 || !Array.isArray(manifest.files)) throw Error('不是完整V2包或声明了未知运行依赖：' + [manifest.name !== NAME ? '包名 ' + manifest.name : '', declared.length ? '依赖 ' + declared.join('、') : '', Array.isArray(manifest.files) ? '' : '缺files声明'].filter(Boolean).join('；') + '；本包要求零运行时依赖（解析器已 vendor 进包内）')
@@ -236,7 +241,7 @@ export async function bootstrap(args = process.argv.slice(2), { env = process.en
   } else validatePackage(root)
   if (!fs.existsSync(path.join(root, 'deploy', 'maintenance', 'driver.mjs'))) throw Error('本地旧代执行器仍需认证；不会调用或下载。请用--package指定新版本地离线包作执行器，旧包保留用于恢复')
   const entry = path.join(root, 'deploy', 'maintenance.mjs'), argv = [entry, op.action, ...op.pass, '--elapsed', String(performance.now() - started)]
-  console.log('使用本地完整包；开始离线维护，成功预算180秒。')
+  console.log(process.platform === 'linux' ? '使用本地插件包；定位接缝后直接维护，完成后保持原运行状态。' : '使用本地完整包；开始离线维护，成功预算180秒。')
   if (invoke) return await invoke(process.execPath, argv)
   const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32', windowsHide: true })
   const detach = () => { child.unref(); console.error('终端中断，已启动维护作业继续。'); process.exit(130) }

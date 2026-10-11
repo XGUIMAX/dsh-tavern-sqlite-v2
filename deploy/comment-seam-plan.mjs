@@ -22,7 +22,11 @@ function condition(value) {
   return value
 }
 function normalizeAnchor(anchor) {
-  keys(anchor, ['type', 'name', 'init', 'source', 'position', 'path', 'first', 'count'], '结构锚点')
+  keys(anchor, ['type', 'name', 'init', 'source', 'position', 'path', 'first', 'count', 'start', 'end'], '结构锚点')
+  if (anchor.type === 'TextRange') {
+    if (!Number.isSafeInteger(anchor.start) || !Number.isSafeInteger(anchor.end) || anchor.start < 0 || anchor.end < anchor.start) fail('文本区间不合法')
+    return { type: 'TextRange', start: anchor.start, end: anchor.end }
+  }
   const result = { type: anchor.type }
   if (anchor.type === 'StatementRange') {
     if (!Array.isArray(anchor.path) || !anchor.path.length || !Number.isSafeInteger(anchor.first) || anchor.first < 0 || !Number.isSafeInteger(anchor.count) || anchor.count < 0) fail('结构语句区间不合法')
@@ -56,7 +60,7 @@ function descriptor(d, owner) {
   if (!['insert', 'replace'].includes(d.mode) || typeof d.purpose !== 'string' || !d.purpose.trim() || /[\r\n\u2028\u2029]/.test(d.purpose)) fail('descriptor mode/purpose 不合法')
   // body 是**我们写入 ACTIVE 的插件实现**：CRLF 现场统一归一为 LF（ORIGINAL 侧仍原样保留 CRLF）；裸 CR/LS/PS 仍拒。
   const body = typeof d.body === 'string' ? d.body.replace(/\r\n/g, '\n') : d.body
-  if (typeof body !== 'string' || (!body.trim() && !(d.mode === 'replace' && body === '')) || /[\r\u2028\u2029]/.test(body) || body.includes(PREFIX)) fail('descriptor body 须为非空 LF 源码，不能含保留标记或其他行终止符')
+  if (typeof body !== 'string' || (body === '' && d.mode !== 'replace') || /[\r\u2028\u2029]/.test(body) || body.includes(PREFIX)) fail('descriptor body 须为非空 LF 源码，不能含保留标记或其他行终止符')
   return { format: 1, revision: d.revision, owner, id: d.id, mode: d.mode, purpose: d.purpose, anchor: normalizeAnchor(d.anchor), body }
 }
 function calleeName(node) {
@@ -81,6 +85,11 @@ function matches(node, a) {
   })
 }
 function findAnchor(source, parsed, a) {
+  if (a.type === 'TextRange') {
+    if (a.end > source.length || a.start > 0 && source[a.start - 1] !== '\n' || a.end < source.length && a.end > 0 && source[a.end - 1] !== '\n') fail('文本区间不是整行或越界')
+    if (source.slice(a.start, a.end).includes(PREFIX) || parsed.blocks.some(b => a.start < b.end && a.end > b.start || a.start === a.end && a.start > b.start && a.start < b.end)) fail('文本区间与其它归属区块重叠')
+    return { start: a.start, end: a.end }
+  }
   if (a.type === 'StatementRange') {
     let list = parsed.ast
     for (const key of a.path) { if (!list || !Object.hasOwn(list, key)) fail('结构语句路径缺失'); list = list[key] }
@@ -159,7 +168,7 @@ export function planSeamInstall(source, { rel, owner, descriptors, record = null
   const ds = descriptors.map(d => descriptor(d, owner))
   if (new Set(ds.map(d => d.id)).size !== ds.length) fail('descriptor id 重复')
   const base = planSeamUninstall(source, { rel, owner }).source   // 现场自有块 → 作者投影（无 history）
-  const parsed = { ...parseSeamSource(base, { rel }), text: base }
+  const parsed = { ...parseSeamSource(base, { rel, ast: ds.some(d => d.anchor.type !== 'TextRange') }), text: base }
   const edits = []
   for (const d of ds) {
     const range = findAnchor(base, parsed, d.anchor)
@@ -170,20 +179,17 @@ export function planSeamInstall(source, { rel, owner, descriptors, record = null
     edits.push({ start, end, text: renderSeam(d, d.mode === 'replace' ? base.slice(start, end) : '') })
   }
   const next = edits.length ? splice(base, edits) : base
-  parseSeamSource(next, { rel })   // 注入语法与块完整性；出错即计划零写入
-  return { source: next, record: recordOf(next, rel, owner), changed: next !== source }
+  return { source: next, record: { format: 1, rel, owner, blocks: ds.map(({ anchor, body, ...metadata }) => metadata) }, changed: next !== source }
 }
 /**
  * 卸载（不依赖记录、不核历史）：现场自有块 → `seamBlockOriginal` 逐行只剥本机制加的一层 `// `；insert 整块删。
  * 块完全消失 ⇒ changed:false 零写（绝不按旧 record 回写 before）；半截块/ORIGINAL 缺前缀由 seamBlockOriginal 抛错。
  */
-export function planSeamUninstall(source, { rel, owner, record = null } = {}) {
+export function planSeamUninstall(source, { rel, owner, record = null, parsed: supplied } = {}) {
   identity(rel, owner)
-  const parsed = { ...parseSeamSource(source, { rel }), text: source }
+  const parsed = supplied ?? parseSeamSource(source, { rel, ast: false })
   const own = parsed.blocks.filter(b => b.metadata.owner === owner)
   if (!own.length) return { source, record: null, changed: false }
   const next = splice(source, own.map(block => ({ start: block.start, end: block.end, text: seamBlockOriginal(source, block) })))
-  const checked = parseSeamSource(next, { rel })
-  const left = checked.blocks.filter(b => b.metadata.owner === owner)
-  return { source: next, record: left.length ? recordOf(next, rel, owner) : null, changed: next !== source }
+  return { source: next, record: null, changed: next !== source }
 }

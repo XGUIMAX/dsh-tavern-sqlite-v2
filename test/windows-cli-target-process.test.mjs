@@ -216,7 +216,7 @@ test('WinCLI：相对 SDK 入口无法归属 → 抛错；字段损坏与清单�
   assert.throws(() => windowsCliProcessList({ run: () => { throw Error('CIM 查询失败') } }), /CIM 查询失败/)
 })
 
-test('WinCLI：非 win32 原分支零改——POSIX runtimeFor 结果逐字不变', t => {
+test('WinCLI：macOS保留原runtimeFor结果', t => {
   const f = fixture(t)
   // 先拿掉 WinCLI 私有布局：POSIX 分支不得依赖它（依赖了就解析不出入口）。
   rmSync(path.join(f.runtime, 'node_modules'), { recursive: true, force: true })
@@ -227,7 +227,7 @@ test('WinCLI：非 win32 原分支零改——POSIX runtimeFor 结果逐字不�
   for (const name of CORE) f.put(path.join(legacy, name, 'index.js'), 'module.exports = {}')
   const bin = path.join(f.home, 'runtime', 'bin', 'dsh')
   f.put(bin, '#!/usr/bin/env node\n')
-  const r = runtimeFor(f.parse(), { platform: 'linux' })
+  const r = runtimeFor(f.parse(), { platform: 'darwin' })
   assert.equal(r.cli, bin); assert.deepEqual(r.cliEntries, [bin, realpathSync(bin)])
   assert.equal(r.host, undefined, 'POSIX 分支不新增 host/windowsCli 字段')
   assert.equal(r.windowsCli, undefined); assert.equal(r.desktop, undefined)

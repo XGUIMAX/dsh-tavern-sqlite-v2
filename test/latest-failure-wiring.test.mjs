@@ -95,7 +95,9 @@ test('最新失败接线：RPC与投影幂等及缺块拒绝', async () => {
   assert.throws(() => applyLatestFailureHostTransform(hostOnce.replace(FAILURE_RPC, 'args.expectedTurn')), /不完整/, '缺 RPC 改动必须拒')
   assert.throws(() => applyLatestFailureHostTransform(hostOnce + '\n// [dsh-tavern-latest-failure-host:v1]\n'), /不完整/, '标记重复必须拒')
   // 真作者 index 的 rollbackTurn 是 multiline 分支（index.js:4386-4387）：按真实缩进文本唯一 mutate，先证命中再拒
-  const rpcAnchor = "      case 'rollbackTurn': {\n        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn)"
+  const rpcAnchor = indexRaw.includes("case 'rollbackTurn': return")
+    ? "case 'rollbackTurn': return { view: await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn) }"
+    : "      case 'rollbackTurn': {\n        const view = await rollbackTurn(args && args.sessionId, args && args.chatId, args && args.expectedTurn)"
   const brokenRpc = indexRaw.replace(rpcAnchor, '')
   assert.notEqual(brokenRpc, indexRaw, '替换必须命中真实 multiline RPC 锚（防"替换没命中"的假缺块）')
   assert.throws(() => applyLatestFailureHostTransform(brokenRpc), /锚点缺失\/不唯一/, '锚点缺失必须拒')

@@ -90,14 +90,14 @@ for (const host of ['cli', 'desktop']) {
     const f = fixture(t, host), before = f.capture()
     const result = await f.run()
     assert.equal(result.check, true)
-    assert.equal(result.changed, true, '预演副本如实报告将施缝的改动；目标零写由 capture 断言兜底')
-    assert.equal(result.ready, true)
+    assert.equal(result.changed, host === 'desktop', 'Linux只读check只报告待接入，目标零写由capture断言兜底；桌面保留预演')
+    assert.equal(host === 'desktop' ? result.ready : result.pending.length > 0, true)
     assert.equal(result.initialState, 'stopped')
-    assert.equal(f.probes.length, host === 'cli' ? 1 : 2, '标准目录维护仅核真实宿主能力，不再调用包管理器')
-    assert.ok(f.probes.some(probe => probe.args.includes('--input-type=module') && probe.args.some(arg => arg.includes('DatabaseSync') && arg.includes('zstdDecompressSync'))), '真实能力探针必须核SQLite与zstd')
+    assert.equal(f.probes.length, host === 'cli' ? 0 : 2, 'Linux不探针；桌面保留真实宿主能力检查')
+    if(host === 'desktop')assert.ok(f.probes.some(probe => probe.args.includes('--input-type=module') && probe.args.some(arg => arg.includes('DatabaseSync') && arg.includes('zstdDecompressSync'))), '桌面真实能力探针必须核SQLite与zstd')
     assert.deepEqual(f.capture(), before, '检查不得改变任何有限源码或profile')
     assert.equal(existsSync(path.join(f.app, STANDARD_RECORD)), false)
-    assert.equal(existsSync(path.join(f.evidence, 'rehearsal', STANDARD_RECORD)), true, '真正接缝预演必须在证据目录发生')
+    assert.equal(existsSync(path.join(f.evidence, 'rehearsal', STANDARD_RECORD)), host === 'desktop', 'Linux无预演，桌面预演仍在证据目录')
     // 真实时钟下的总耗时必须是正数（该结果来自真 performance.now，不做任何相位扣除）。
     assert.ok(result.elapsedMs > 0, '检查必须报告真实耗时：' + result.elapsedMs)
   })
@@ -120,7 +120,7 @@ for (const host of ['cli', 'desktop']) {
     assert.ok(plan.compatible.failures.some(message => /开局动态分类宿主锚点缺失\/重复/.test(message)),
       '预演失败原因必须是必需锚点损坏：' + JSON.stringify(plan.compatible.failures))
     // 消费者层结论：维护 check/install 预检拒绝，且目标源码与profile一字未改。
-    await assert.rejects(f.run(), /与可信基线不兼容|作者版本未适配/)
+    await assert.rejects(f.run(), host === 'cli' ? /开局动态分类宿主锚点缺失\/重复/ : /与可信基线不兼容|作者版本未适配/)
     assert.deepEqual(f.capture(), before)
   })
   test('8480f7de ' + host + '：不同代（0.2.2 旧包在装）check 仍通过且目标零改（新机制允许换代，不再拒绝）', async t => {
@@ -132,8 +132,8 @@ for (const host of ['cli', 'desktop']) {
     const before = f.capture()
     const result = await f.run()
     assert.equal(result.check, true)
-    assert.equal(result.changed, true, '预演副本如实报告将施缝的改动；目标零写由 capture 断言兜底')
-    assert.equal(result.ready, true)
+    assert.equal(result.changed, host === 'desktop', 'Linux只读check只报告待接入，目标零写由capture断言兜底；桌面保留预演')
+    assert.equal(host === 'desktop' ? result.ready : result.pending.length > 0, true)
     assert.deepEqual(f.capture(), before, '检查不得改变任何有限源码或profile')
     assert.equal(JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8')).version, '0.2.2', 'check 不写现装包')
   })
@@ -141,7 +141,8 @@ for (const host of ['cli', 'desktop']) {
     const f = fixture(t, host), file = path.join(f.peerRoot, ...f.peers[0].split('/'), 'package.json')
     writeFileSync(file, JSON.stringify({ name: f.peers[0], version: '0.1.5-rc.1' }) + '\n', 'utf8')
     const before = f.capture()
-    await assert.rejects(f.run(), /既有宿主peer缺失\/未适配/)
+    if(host === 'desktop')await assert.rejects(f.run(), /既有宿主peer缺失\/未适配/)
+    else { const result=await f.run();assert.equal(result.check,true);assert.equal(f.probes.length,0,'Linux不因peer版本探针拒绝') }
     assert.deepEqual(f.capture(), before)
   })
 }
@@ -152,7 +153,7 @@ test('8480f7de cli：合法非空profile覆盖不再拒绝预检且目标零改'
   const before = f.capture()
   const result = await f.run()
   assert.equal(result.check, true)
-  assert.equal(result.ready, true)
+  assert.ok(result.pending.length > 0)
   assert.equal(readFileSync(f.patch, 'utf8'), USER_PATCH, '用户层 patch 必须逐字保留')
   assert.deepEqual(f.capture(), before, '检查不得改写任何 profile/目标字节')
 })

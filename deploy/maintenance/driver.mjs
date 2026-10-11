@@ -13,6 +13,7 @@ import { waitSystemdExecIdentity } from './start-identity.mjs'
 import { STANDARD_RECORD } from './source.mjs'
 import { AUTHOR_VERSION } from '../../lib/standard-host.js'
 import { createStandardInstallation } from './standard-installation.mjs'
+import { createLinuxDriver } from './linux-driver.mjs'
 const family = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1', 'dsh-tavern-sqlite-v2']
 // 运行时依赖**必须为零**：四个解析器依赖（lodash/yaml/json5/jsonrepair）与注释块 lexer（acorn）已 vendor 进包内
 // （见 lib/vendor/VENDOR.md + manifest.json）。零依赖是"任何宿主都能离线安装"的前提：
@@ -448,6 +449,7 @@ export function createWindowsCliDriver(op, adapter, root, evidence, budget, opti
 }
 
 export function createDriver(op, adapter, packageRoot, evidence, budget, { platform = process.platform, processFinder = findProcess, processReader = readProcess, runPackage = packageCommand, request = fetch, runtimeResolver = runtimeFor, runCommand = command, portOpen = tcpOpen, alive = processAlive } = {}) {
+  if (platform === 'linux' && op.host !== 'desktop') return createLinuxDriver(op, adapter, packageRoot, evidence, { processFinder, runCommand, alive })
   const runtime = runtimeResolver(op, { platform }), context = { ...op, ...runtime }, installed = path.join(op.profileDir, 'node_modules', adapter.packageName)
   // posix 侧同 helper：peer 链接指向 `home/runtime/lib`（官方 pnpm 代），不依赖 profile 内同名 dep/bundle。
   const assembly = createStandardInstallation({

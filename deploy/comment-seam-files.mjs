@@ -21,7 +21,6 @@ export function ownedFileBlock(source, { rel, owner }) {
 }
 export function wrapOwnedFile(body, { rel, owner }) {
   if (typeof body !== 'string' || !body.trim()) throw Error('注释接缝：新建桥文件缺插件实现：' + rel)
-  parseSeamSource(body, { rel })
   if (body.includes('[dsh-tavern-seam:')) throw Error('注释接缝：新建桥文件实现不能嵌套区块：' + rel)
   return '// [dsh-tavern-seam:BEGIN] format=1 revision=1 owner=' + owner + ' id=owned-file mode=insert purpose="插件桥接文件"\n'
     + '// [dsh-tavern-seam:ACTIVE_BEGIN]\n' + body + (body.endsWith('\n') ? '' : '\n')

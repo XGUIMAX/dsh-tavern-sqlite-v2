@@ -7,3 +7,4 @@ import { storagePackage } from './storage-package.js'
 export const {
   ledgerFailureState, surfaceFailureState, mergeFailureState, sessionTailState, readFailureState,
 } = await storagePackage('failure-state')
+export const { foldSurfaceForEvidence } = await storagePackage('host-session-install')

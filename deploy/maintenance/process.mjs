@@ -25,6 +25,14 @@ export function invocation(argv, target) {
   const index = argv.findIndex((arg, i) => i > 0 && target.cliEntries.includes(arg))
   if (index < 1) return null
   const args = argv.slice(index + 1), found = {}
+  if (target.simpleMaintenance) {
+    // 只取定位所需参数；完整 argv 原样保存，其他作者/Node参数不作安装资格检查。
+    const value = key => { const at = args.indexOf(key); return at < 0 ? undefined : args[at + 1] }
+    if (value('--profile') !== target.profile) return null
+    const port = Number(value('--port')), host = value('--host') || '127.0.0.1'
+    if (target.port && port !== Number(target.port)) return null
+    return { port, host }
+  }
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--no-open') { if (found.noOpen) throw Error('重复启动参数'); found.noOpen = true; continue }
     if (!['--profile', '--host', '--port'].includes(args[i]) || !args[i + 1] || found[args[i]]) throw Error('不支持的启动参数，拒绝猜测恢复')
@@ -77,6 +85,10 @@ export function readProcess(pid, target, platform = process.platform) {
       // launchd拥有的目标不能以直接CLI方式旁路重启；要求先从管理器停止。
       const parent = command('ps', ['-p', String(pid), '-o', 'ppid=']).trim()
       if (parent === '1' && command('launchctl', ['list']).split('\n').some(line => line.trim().startsWith(pid + '\t'))) throw Error('launchd管理实例请先通过原任务停止，再安装；不旁路启动')
+    }
+    if (target.simpleMaintenance) {
+      if (env.DSH_HOME && env.DSH_HOME !== target.home) return null
+      return { pid: Number(pid), argv, env, cwd, start, cgroup, ...launch }
     }
     if (cwd !== target.app || env.DSH_HOME !== target.home || !env.PATH || !start) throw Error('进程cwd/home/PATH/代次不匹配，拒绝认领')
     return { pid: Number(pid), argv, env: stripSecrets(env), cwd, start, cgroup, ...launch }
