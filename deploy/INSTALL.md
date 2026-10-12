@@ -19,13 +19,13 @@ Linux 安装只需定位目标、命中必需接缝、停止原运行实例后�
 
 ## 支持范围
 
-- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 0.4.7 的适配目标为上游 `7e349fabac54c56e9c09337efb2ee934cef254f2`（简称 `7e349fa`，Tavern2.5.0；runtime `10c8f1ae1351194708c9aeefdf85b59089f01de8` / sequence586，DSH SDK0.1.5-rc.2）。已发布0.4.2尚不包含本次适配及标准目录改造。
+- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 0.4.8 的适配目标为上游 main `038cc63fc438c01e2b4b13ff24e3438c974cd27f`（简称 `038cc63`，Tavern2.6.0；作者代码版本 `39602e9f70549e979446a3752fced786a3b5bab9`，DSH SDK0.1.5-rc.2）。
 - **其他未适配版本使用过程中可能出现运行错误。** 安装接入检查通过不代表运行期功能兼容；请更新到对应 Release 标注的适配酒馆版本，或自行适配本插件后使用。版本标注是兼容说明，不新增作者SHA、签名或纯净源码准入。
 
 - 支持 macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron、原生 Windows CLI）。运行能力和适配范围以 Release 说明为准；Linux 装卸不检查 DSH / boot 版本、Node VM 旗标或 SQLite / zstd 能力。
 - **Linux 接入**：全部必需接缝在当前源码唯一命中后直接注入；清单缺失/过时、用户改块外代码（不破坏接缝）均不影响安装。Windows / macOS 仍保留隔离预演及既有环境检查。
 - **发布状态**：现场注释区块装卸自 **0.3.8** 起已公开发布，机制说明见 [COMMENT-SEAMS.md](<COMMENT-SEAMS.md>)；旧机制（≤0.3.7）现场需先用旧版插件自带 CLI 完整卸载，再安装本版。
-- **0.4.7 提供上述 Linux / WSL2 直接维护流程**；0.4.6 附件仍是旧执行器，使用新流程须下载0.4.7或后续版本。同名插件换版本由统一维护命令清旧装配再安装，不作包字节比较。
+- **0.4.8 延续上述 Linux / WSL2 直接维护流程并加入2.6场景slot与造型参考存档适配**；旧版附件不包含本次2.6适配，使用新能力须下载0.4.8或后续版本。同名插件换版本由统一维护命令清旧装配再安装，不作包字节比较。
 - 运行依赖零 npm 外部依赖：`json5`、`jsonrepair`、`lodash`、`yaml` 与注释块词法器 `acorn`（8.15.0，MIT）均已 vendor 进包内，安装不联网补依赖。
 - 当前源码在各平台统一复制程序到酒馆标准数据插件目录，包内 peer 仍链接宿主同一物理实例；不再把本包加为 profile 依赖或 bundle，不调用包管理器装卸本包，不重装其它依赖、不联网补 SDK。
 - Linux 不检查或补 `--experimental-vm-modules`，不改 systemd 单元、原 argv/cwd/env 或 KillMode；`--prepare-env` 只作为旧参数兼容且不修改环境。macOS 保留既有维护路径；Windows CLI 拒绝 `--prepare-env` / systemd 接管。

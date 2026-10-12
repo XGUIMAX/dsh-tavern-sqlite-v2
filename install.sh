@@ -1,9 +1,9 @@
 #!/bin/sh
 # 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
 set -eu
-RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.7/dsh-tavern-sqlite-v2-0.4.7.tgz'
-RELEASE_SHA256='265ccd8c4de0fab76dc608676a0d965d67a33860a55417de41a8c7512bb689e9'
-VERSION='0.4.7'
+RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.8/dsh-tavern-sqlite-v2-0.4.8.tgz'
+RELEASE_SHA256='76f33b0b46e14c3a6dffcfceb43a29f70829e97125230d1fa596b281636414ba'
+VERSION='0.4.8'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;

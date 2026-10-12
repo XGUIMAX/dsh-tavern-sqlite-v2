@@ -551,3 +551,80 @@ test('不完整清理B：正常body53后台failed时按ordinary回退恢复52并
   assert.deepEqual(f.session.snapshotEvents(),prefix,'B：原生前缀逐事件保持')
  }finally{await f.cleanup()}
 })
+
+test('普通回退：同轮陈旧完成凭据不锁死，同轮陈旧凭据幂等补发同 id',async()=>{
+ const f=await fixture()
+ try{
+  const firstChat=await f.read()
+  // 结构化 ordinaryTarget：revision 取首次调用时的当前值；第二次仍用这枚旧 target 重发。
+  const target={kind:'rollback',turn:53,revision:firstChat._storageRevision,chatId:firstChat.id,sessionId:firstChat.sessionId,branchId:firstChat.timeline.branchId}
+  const first=await cleanRollback({...f.args,chat:firstChat,requestedTurn:target})
+  assert.equal(first.rolledBack.hiddenTurn,53)
+  const c1=(await f.read()).rollbackCompletion
+  assert.ok(c1&&c1.id,'首次普通回退必须留下完成凭据')
+  assert.equal((await f.read()).messages.some(row=>Number(row.turn)>=53),false,'首次回退后不得残留该轮正文')
+  const framesAfterFirst=f.syncFrames.length
+  // 推进一个非剧情 Chat revision（同 branch、同 turn 不变）：旧逻辑会因 revision 落后永久拒绝同轮重发。
+  await f.update(f.base.id,current=>{current.guides=[{text:'非剧情编辑后的配置'}];return current},{source:'configuration.edit'})
+  const edited=await f.read()
+  assert.equal(edited.timeline.branchId,c1.branchId,'分支必须不变')
+  assert.notEqual(edited._storageRevision,c1.revision,'revision 必须已推进')
+  const sqlBefore=f.mainDb.stmts.selectEvents.all().length
+  const second=await cleanRollback({...f.args,chat:edited,requestedTurn:target})
+  assert.equal(second.rolledBack.hiddenTurn,53,'同轮重发必须成功而不是拒绝')
+  const c2=(await f.read()).rollbackCompletion
+  assert.ok(c2&&c2.id,'重发后仍需留下完成凭据')
+  assert.equal(c2.id,c1.id,'陈旧且已删净时必须复用原 completion id（幂等补发）')
+  assert.equal(f.mainDb.stmts.selectEvents.all().length,sqlBefore,'幂等补发不得删除或写入任何 SQL 行')
+  assert.equal((await f.read()).messages.some(row=>Number(row.turn)>=53),false,'重发后仍不得残留该轮正文')
+  assert.ok(f.syncFrames.length>framesAfterFirst,'重发必须再次广播')
+ }finally{ if(f.cleanup) await f.cleanup() }
+})
+test('账本前像集成：物理回退可重建已回收的上轮body节点',async()=>{
+ const f=await fixture()
+ try{
+  // 真消费者：cleanRollback 经 args.chats 取前像历史（公导出），不是只测 core。
+  f.args.chats.readRollbackOperationSnapshot=f.store.readRollbackOperationSnapshot
+  // 1) base52 业务基准：hp51 + 确切 messageCount（= base.messages.length-2，即52之前）
+  const captured=captureRollbackBusinessState(f.base)
+  const fields52={...captured.fields,variables:{hp:51}}
+  const messageCount52=f.base.messages.length-2
+  const body52={kind:'body',turn:52,businessBefore:{version:1,fields:fields52,messageCount:messageCount52,participants:{},operationIds:[],states:{}}}
+  await f.update(f.base.id,c=>{
+   c.timeline.operations.body52=structuredClone(body52)
+   return c
+  })
+  f.args.chat=await f.read()   // 准备态改动后必须清 stale
+  // 2) 53 的 before 必须取自 base52 状态（不含 53 正文）：历史 body52 落在 53before 内，当前主状态保持 53，
+  //    否则 messageCount 会把 53 正文算进去，清理后仍停 53。
+  const base52={...f.base,timeline:{...f.base.timeline,operations:{body52:structuredClone(body52)},checkpoints:[],participants:{}}}
+  const recaptured=captureRollbackBusinessState(base52)
+  await f.update(f.base.id,c=>{
+   c.timeline.operations.body.businessBefore=structuredClone(recaptured)
+   const cp=[...c.timeline.checkpoints].reverse().find(item=>item.businessBefore!==undefined)
+   if(cp)cp.businessBefore=structuredClone(recaptured)
+   return c
+  })
+  f.args.chat=await f.read()
+  // 3) 回收 52 的 body 节点与其 checkpoint（52 前像只剩历史引用）
+  await f.update(f.base.id,c=>{
+   delete c.timeline.operations.body52
+   c.timeline.checkpoints=c.timeline.checkpoints.filter(item=>Number(item.turn)!==52)
+   return c
+  })
+  f.args.chat=await f.read()
+  assert.equal(f.args.chat.timeline.operations.body52,undefined,'52 body 必须已从当前档回收')
+  // 4) 真入口物理回退：必须经 chats resolver 从历史重建 52 body（含其 hp51 前像）
+  const result=await cleanRollback(f.args)
+  const after=await f.read()
+  assert.equal(result.turn,52)
+  assert.deepEqual(after.variables,{hp:52},'变量必须回到 52 的值')
+  assert.equal(after.messages.at(-1).turn,52,'正文必须回到 52')
+  const rebuilt=after.timeline.operations.body52
+  assert.ok(rebuilt,'历史 resolver 必须重建已回收的 52 body 节点')
+  assert.equal(rebuilt.businessBefore.fields.variables.hp,51,'重建前像必须来自历史（hp51）')
+  assert.equal(rebuilt.businessBefore.messageCount,messageCount52,'重建前像 messageCount 必须与历史一致')
+  assert.equal(f.mainDb.cursor(),f.keep,'原生 session 必须回到 keep')
+  assert.equal(after.rollbackPending,undefined,'回退后不得残留 rollbackPending')
+ }finally{await f.cleanup()}
+})

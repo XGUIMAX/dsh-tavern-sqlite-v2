@@ -6,6 +6,8 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { restoreDatabase, inspectDatabase, snapshotDatabase, encodeDbSave, decodeDbSave, watchDbSaveSources } from '../lib/db-save-codec.js'
+import { archiveFixture } from './db-save-exchange.test.mjs'
+import { rewriteSaveTables, saveIdentityMap } from '../lib/db-save-identities.js'
 function tables() {
   return { meta: [{ key: 'schema_version', value: '1' }], sessions: [{ id: 'session-dummy-codec', header_json: '{"id":"session-dummy-codec","version":1,"createdAt":1}', format_version: 1, created_at: 1, inherited_event_count: 0, event_count: 1 }], events: [{ seq: 0, type: 'turn/end', time: 1, data_json: '{"turn":1}', extra_json: null }] }
 }
@@ -144,4 +146,36 @@ test('DB消息占位结构冲突在恢复目标前拒绝', t => {
   broken.archive_head_fields = broken.archive_head_fields.map(row => row.key === 'messages' ? { ...row, kind: 0, value_json: '"a"' } : row)
   assert.throws(() => restoreDatabase(f.source, 'archive', broken), /消息占位结构冲突/)
   assert.equal(existsSync(f.source), false)
+})
+
+test('账本前像DB交换：新历史表随快照重绑且旧无表输入兼容', t => {
+  const archive = archiveFixture()
+  const headFields = Object.fromEntries(archive.archive_head_fields.map(row => [row.key, JSON.parse(row.value_json)]))
+  const sourceChat = { id: headFields.id, sessionId: headFields.sessionId }
+  const cuts = JSON.parse((archive.archive_head_fields.find(row => row.key === 'rollbackSessionCuts') || { value_json: '{}' }).value_json)
+  const sideSessions = [...new Set(Object.values(cuts || {}).flatMap(entry => Object.keys(entry || {})))]
+  const allSessions = [sourceChat.sessionId, ...sideSessions]
+  let newSeq = 0
+  const identity = saveIdentityMap(sourceChat, allSessions, () => 'session-new-' + String(++newSeq).padStart(2, '0'))
+  // 真实 archive 往返：补一行操作历史（前像引用 + 旧 chatId）后建库/快照/回读
+  archive.archive_operation_history = [{ operation_snapshot_id: 7, snapshot_json: JSON.stringify({ chatId: sourceChat.id, businessBefore: { version: 1, fields: { hp: 51 }, operationPreimages: { 'body-1': { operationSnapshotId: 7 } } } }) }]
+  const f = files(t)
+  restoreDatabase(f.source, 'archive', archive)
+  snapshotDatabase(f.source, f.output, 'archive')
+  const copied = inspectDatabase(f.output, 'archive')
+  assert.equal(copied.tables.archive_operation_history.length, 1, '新历史表必须随 archive 快照携带')
+  assert.equal(Number(copied.tables.archive_operation_history[0].operation_snapshot_id), 7, '主键 7 必须原样携带')
+  assert.match(String(copied.tables.archive_operation_history[0].snapshot_json), /operationPreimages/, '前像 body 必须逐字带过去')
+  const rebound = rewriteSaveTables(copied.tables, sourceChat, identity)
+  const row = rebound.archive_operation_history[0]
+  assert.equal(Number(row.operation_snapshot_id), 7, '重绑必须保留 operation_snapshot_id=7')
+  const parsed = JSON.parse(row.snapshot_json)
+  assert.equal(parsed.chatId, identity.chatId, '前像内 chatId 必须按身份 map 重绑到新 chatId')
+  assert.deepEqual(parsed.businessBefore.operationPreimages, { 'body-1': { operationSnapshotId: 7 } }, '重绑不得改动前像引用')
+  // 旧 tables 无该表：真实 archive restore/snapshot 必须照常工作
+  const legacy = archiveFixture(); delete legacy.archive_operation_history
+  const g = files(t)
+  restoreDatabase(g.source, 'archive', legacy)
+  snapshotDatabase(g.source, g.output, 'archive')
+  assert.equal(inspectDatabase(g.output, 'archive').tables.archive_operation_history.length, 0, '旧无表输入必须兼容')
 })

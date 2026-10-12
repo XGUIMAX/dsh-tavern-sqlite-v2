@@ -75,3 +75,93 @@ test('实际画像切换与玩家称呼保留当前，资源路径和未知手�
  for(const key of Object.keys(config))assert.equal(Object.hasOwn(captureRollbackBusinessState(after).fields,key),false,key)
  delete after.macroState.userName;restoreRollbackBusinessState(after,baseline);assert.equal(Object.hasOwn(after.macroState,'userName'),false)
 })
+
+test('业务快照：无前像的纯 operationId 缺失时恢复不抛错', () => {
+  const chat = { messages: [], variables: {}, timeline: { branchId: 'b', revision: 1, checkpoints: [], operations: {
+    'body-1': { kind: 'body', turn: 1, businessBefore: { version: 1, fields: {} } },
+    'agent-1': { kind: 'agent', role: 'settlement', turn: 1 },
+  } } }
+  const baseline = captureRollbackBusinessState(chat)
+  assert.deepEqual(baseline.operationIds.sort(), ['agent-1', 'body-1'], 'operationIds 必须保留全部操作')
+  assert.deepEqual(Object.keys(baseline.operationStates), ['body-1'], 'operationStates 只记有前像的操作')
+  const pruned = structuredClone(chat)
+  delete pruned.timeline.operations['agent-1']
+  assert.doesNotThrow(() => restoreRollbackBusinessState(pruned, baseline), '纯 operationId 节点被回收后不得拒绝恢复')
+})
+
+test('账本前像：节点删除后按保存前像恢复且可继续回退', () => {
+  const chat = { messages: [], variables: {}, timeline: { branchId: 'b', revision: 1, checkpoints: [{ turn: 1, businessBefore: { version: 1, fields: {}, messageCount: 0 }, rowBefore: { posture: 'row' }, beforeParticipants: {} }], operations: {
+    'body-1': { kind: 'body', turn: 1, businessBefore: { version: 1, fields: {}, messageCount: 0 }, rowBefore: { posture: 'row' }, beforeParticipants: {} },
+    'agent-1': { kind: 'agent', role: 'ledger', turn: 1 },
+  } } }
+  const baseline = captureRollbackBusinessState(chat)
+  const original = structuredClone(chat.timeline.operations['body-1'])
+  const pruned = structuredClone(chat)
+  delete pruned.timeline.operations['body-1']
+  // 不依赖当前 operation 或 checkpoint；基准已保存确切前像。
+  pruned.timeline.checkpoints=[]
+  restoreRollbackBusinessState(pruned, baseline)
+  assert.deepEqual(pruned.timeline.operations['body-1'], original, 'body operation 必须按同轮确切前像深等还原')
+  assert.deepEqual(Object.keys(pruned.timeline.operations).sort(), ['agent-1', 'body-1'])
+  // 重建的操作仍带真实前像，可继续解析更早的业务状态。
+  const resolved = resolveRollbackBusinessState(pruned, 1, true)
+  assert.equal(resolved.messageCount, 0)
+})
+
+test('账本前像：current 前像被改仍以历史引用为准，缺 resolver 时先报错且 chat 全等未半改', () => {
+  const chat = { messages: [], variables: {}, timeline: { branchId: 'b', revision: 1, checkpoints: [], operations: {
+    'body-1': { kind: 'body', turn: 1, businessBefore: { version: 1, fields: { variables: { hp: 52 } }, messageCount: 1 } },
+  } } }
+  const baseline = captureRollbackBusinessState(chat)
+  const historyPreimage = structuredClone(baseline.operationPreimages['body-1'])
+  baseline.operationPreimages['body-1']={version:1,chatId:'fixture',operationSnapshotId:1}
+  const mutated = structuredClone(chat)
+  mutated.timeline.operations['body-1'].businessBefore = { version: 1, fields: { variables: { hp: 999 } }, messageCount: 1 }
+  const frozen = structuredClone(mutated)
+  // 缺 resolver：必须报错且不得留下半恢复状态（chat 与调用前全等）
+  assert.throws(() => restoreRollbackBusinessState(mutated, baseline), /接线|resolver|历史/, '缺 readOperation 接线必须报错')
+  assert.deepEqual(mutated, frozen, '缺接线失败后 chat 必须全等未半改')
+  // 给了历史 resolver：即使 current 前像被改，也取历史前像
+  const restored = structuredClone(mutated)
+  const readOperation = (target, ref) => {
+    assert.equal(ref && typeof ref === 'object', true, 'resolver 必须收到引用对象')
+    return structuredClone(historyPreimage)
+  }
+  restoreRollbackBusinessState(restored, baseline, undefined, undefined, readOperation)
+  assert.deepEqual(restored.timeline.operations['body-1'].businessBefore, historyPreimage.businessBefore, '前像必须来自历史而非被改的 current')
+})
+
+test('账本前像：旧基准从同轮checkpoint重建缺失body前像',()=>{
+ const historical={version:1,fields:{variables:{hp:51}},messageCount:0,participants:{},operationIds:[],operationStates:{}}
+ const chat={messages:[],variables:{hp:52},timeline:{operations:{body:{kind:'body',turn:52,businessBefore:historical,beforeParticipants:{}}},checkpoints:[{turn:52,businessBefore:historical,participants:{}}],participants:{}}}
+ const baseline=captureRollbackBusinessState(chat),expected=structuredClone(chat.timeline.operations.body)
+ delete baseline.operationPreimages
+ delete chat.timeline.operations.body
+ restoreRollbackBusinessState(chat,baseline)
+ assert.deepEqual(chat.timeline.operations.body,expected)
+ assert.deepEqual(resolveRollbackBusinessState(chat,52,true),historical)
+})
+
+test('账本前像：旧 baseline 无 preimages 时非 body 缺失仅按 state 重建不阻断', () => {
+  const chat = { messages: [], variables: {}, timeline: { branchId: 'b', revision: 1, checkpoints: [], operations: {
+    'agent-1': { kind: 'agent', role: 'ledger', turn: 1, businessBefore: { version: 1, fields: {} } },
+  } } }
+  const baseline = captureRollbackBusinessState(chat)
+  delete baseline.operationPreimages
+  const pruned = structuredClone(chat)
+  delete pruned.timeline.operations['agent-1']
+  assert.doesNotThrow(() => restoreRollbackBusinessState(pruned, baseline), '旧 baseline 无 preimages 时缺失非 body 仅按 state 重建')
+})
+
+test('账本前像：真实历史缺失（无同轮前像且无 resolver）仍按错误身份拒绝', () => {
+  const chat = { messages: [], variables: {}, timeline: { branchId: 'b', revision: 1, checkpoints: [], operations: {
+    'body-1': { kind: 'body', turn: 1, businessBefore: { version: 1, fields: {} } },
+  } } }
+  const baseline = captureRollbackBusinessState(chat)
+  delete baseline.operationPreimages // 旧格式本来没有保存操作前像。
+  const pruned = structuredClone(chat),original=structuredClone(chat)
+  delete pruned.timeline.operations['body-1']
+  const beforeRestore=structuredClone(pruned)
+  assert.throws(() => restoreRollbackBusinessState(pruned, baseline), /历史/, '真实历史资料缺失不得伪造')
+  assert.deepEqual(pruned,beforeRestore,'失败不得留下半恢复状态')
+})

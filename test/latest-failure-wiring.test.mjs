@@ -130,6 +130,7 @@ function projectorDeps() {
     incrementalReplyView: { project: async () => ({ projections: [], statusViews: [] }) },
     composeTavernRegexScripts: () => [],
     liveCardUpdate: { project: async (_c, _card, display) => display },
+    projectCompactionState: chat => chat.contextCompaction || null,
     withLegacyPresentationProjection: (_chat, projections) => projections,
     readCardExtensions: async () => ({ regexScripts: [], helperScripts: [], variables: {}, globalRegexScripts: [], characterRegexScripts: [], frameSizing: 'fill' }),
     tavernRemoteAssets: { pinExtensions: async extensions => ({ helperScripts: extensions.helperScripts || [], regexScripts: extensions.regexScripts || [], diagnostics: [], pins: [] }) },

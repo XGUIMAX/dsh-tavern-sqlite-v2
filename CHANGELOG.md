@@ -1,5 +1,17 @@
 # 更新日志
 
+## 0.4.8 Tavern 2.6多插图与DB资源便携
+
+- **适配酒馆版本**：DSH Tavern **2.6.0 / main `038cc63`**（完整提交 `038cc63fc438c01e2b4b13ff24e3438c974cd27f`，作者代码版本 `39602e9f70549e979446a3752fced786a3b5bab9`，SDK0.1.5-rc.2）。其他未适配版本可能运行报错，安装接入成功不代表运行期功能兼容。
+- 作者`scene-slots.js`作为只读依赖接入；scene捕获、校验和安装按`turn + slot`闭包处理，每轮最多6条记录，逐槽建立新旧key映射，跨槽不猜测。
+- DB包scene记录新增可移植字段`slot`/`addRequest`（≤2000字符）与版本内`anchor`；第三方按slot key登记的插件数据和媒体也按槽位对齐重绑。
+- 造型参考`references.json`随DB存档迁移：仅携带闭包内有效绑定，source/activation key逐槽换新，附件与重写后场景版本深等，id与撤销列表同步重写；支持作者正常的`enabled:false + image:null`取消绑定记录，失败写入纳入既有资源回滚。
+- DB包携带当前正文版本的插件数据、游戏级数据/设置、图片及通用媒体附件；导入按新chat/session/textVersion/媒体ID/附件恢复，异常补偿只清新目标副数据。
+- 停用新增发送前软墓碑清理，失败输入必须先经既有统一物理清理；不同轮遗留模板变量先撤销再捕获下一轮业务基准，同轮继续准备保留输入。
+- 操作前像历史随DB包携带并重绑身份，旧无此表存档兼容；历史账本恢复与压缩警告独立视图修复一并纳入。
+- 已知取舍（沿0.4.x既有字段白名单）：DB包不携带运行/审计字段（requests/ownerId/ownerPid/outcome/providerTask/deletedVersions/configuration等），导入档不提示"上次结果未确认"、不续接在途生图任务；图片渲染、导出配图和参考重绑不受影响。
+- 保持SQL唯一权威、物理纯尾、事务/CAS、旧写隔离及原档只读/用户双新ID分叉，不自动迁移或清理用户存档。
+
 ## 0.4.7 新上游适配与 Linux 安装维护简化
 
 - **适配酒馆版本**：DSH Tavern **2.5.0 / `7e349fa`**（完整提交 `7e349fabac54c56e9c09337efb2ee934cef254f2`，runtime `10c8f1ae1351194708c9aeefdf85b59089f01de8` / sequence586，SDK0.1.5-rc.2）。适配范围以本版 [Release 更新说明](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/tag/v0.4.7)为准。

@@ -157,6 +157,7 @@ export const PENDING_HOST_WIRING = Object.freeze([
 export const DEFAULT_DEPS_EXPRESSION = `{
     get str() { return str },
     get assembleTavernView() { return assembleTavernView },
+    projectCompactionState: chat => projectCompactionWarning(chat.contextCompaction, ctx.llm.listProviders()),
     get readTavernSettings() { return readTavernSettings },
     get readScript() { return readScript },
     get scriptContinuity() { return scriptContinuity },
@@ -235,6 +236,9 @@ export function applyNativeDataTransform(source, options = {}) {
       if (!next.includes('const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },') || next.includes('get assembleTavernView()')) throw Error('native-data旧组装器接线布局不完整')
       next = next.replace(oldImport, 'import { createSessionWindowProjector, createActivitySummaryBridge, assembleTavernView } from $1')
         .replace('const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },', 'const sessionWindowProjector = createSessionWindowProjector({\n    get str() { return str },\n    get assembleTavernView() { return assembleTavernView },')
+    }
+    if (options.depsExpression === undefined && !next.includes('projectCompactionState: chat => projectCompactionWarning(chat.contextCompaction, ctx.llm.listProviders())')) {
+      next = next.replace('get assembleTavernView() { return assembleTavernView },', 'get assembleTavernView() { return assembleTavernView },\n    projectCompactionState: chat => projectCompactionWarning(chat.contextCompaction, ctx.llm.listProviders()),')
     }
     assertBlocks(next)
     if (!next.includes('get assembleTavernView() { return assembleTavernView }') && options.depsExpression === undefined) throw Error('native-data组装器接线不完整')

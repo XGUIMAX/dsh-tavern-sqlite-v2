@@ -7,6 +7,7 @@ import { planSeamInstall, planSeamUninstall } from './comment-seam-plan.mjs'
 import { describeSeamChanges } from './comment-seam-descriptors.mjs'
 import { COMMENT_SEAMS_RECORD, wrapOwnedFile } from './comment-seam-files.mjs'
 const OWNER='dsh-tavern-sqlite-v2', DOMAIN='tavern-plugin/lib/domain/'
+export const maintenanceReadSources=Object.freeze(['tavern-plugin/lib/domain/scene-slots.js'])
 const HOST=['index.js','plugin-api.js','client.js','background-agent-task.js','background-agent-sessions.js','http/routes.js','hooks/turn-lifecycle.js','hooks/request.js']
 const SOURCE=['main.js','features/play-controls.js','features/turn-history.js','turn-error-controls.js','ui/error-center.js','helper-resources.js','runtime/helper-bootstrap.js','runtime/helper-script-runtime.js','modules/host-session-patch.js','modules/session-view-sync.js','modules/live-tavern-view.js','modules/tavern-coordination.js']
 const DOMAINS=['chat-sqlite-store.js','tavern-conversation-registry.js','conversation-initialization.js','session-view-reader.js','legacy-view-seams.js','round-history.js','story-timeline.js','model-error-presentation.js','tavern-script-host-adapter.js','tavern-script-dispatch.js','server-template-runtime.js','conversation-fork-point.js','chat-history-rescue.js','opening-preparation.js','storage-opening-runtime.js','storage-native-data.js','storage-fork-history.js','storage-server-execution.js','storage-helper-readonly.js','storage-rollback.js','storage-budgets.js','storage-package.js','storage-db-save.js','storage-current-variables.js','storage-compaction-warning.js','read-variables.js','storage-rollback-business.js','storage-failure-state.js','turn-orchestration.js','settlement-jobs.js','foreground-handoff.js','server-template-sync.js','candidate-worldbook-preparation.js','auto-compaction.js','chat-session-state.js','card-summary-cache.js','worldbook-library.js','file-resources.js','session-resource-access.js','background-session-retirement.js','game-footprint.js','background-task-coordinator.js']
@@ -14,7 +15,7 @@ export const maintenanceTargets=Object.freeze([...HOST.map(s=>'tavern-plugin/lib
 const OLD_RECORDS=['.tavern-standard-seams.json','.tavern-seams.json','.tavern-legacy-view-seams.json','.tavern-save-ui-seam.json']
 const utf8=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true})
 function safeFile(root,rel){
- if(!maintenanceTargets.includes(rel)&&!['tavern-plugin/package.json',COMMENT_SEAMS_RECORD,...OLD_RECORDS].includes(rel))throw Error('源码路径不属于接缝清单：'+rel)
+ if(!maintenanceTargets.includes(rel)&&!maintenanceReadSources.includes(rel)&&!['tavern-plugin/package.json',COMMENT_SEAMS_RECORD,...OLD_RECORDS].includes(rel))throw Error('源码路径不属于接缝清单：'+rel)
  const file=path.resolve(root,rel)
  for(let p=file;;p=path.dirname(p)){let st;try{st=fs.lstatSync(p)}catch(e){if(e.code!=='ENOENT')throw e}if(st?.isSymbolicLink())throw Error('接缝目标不能是外部链接：'+rel);if(p===path.dirname(p))break}
  return file
@@ -25,7 +26,7 @@ function context(appDir){
  const root=path.resolve(appDir),pkg=JSON.parse(read(root,'tavern-plugin/package.json'))
  if(pkg.name!=='dsh-tavern-plugin')throw Error('目标不是酒馆目录')
  for(const rel of OLD_RECORDS)if(fs.existsSync(safeFile(root,rel)))throw Error('旧机制接缝须先用所属旧入口卸载：'+rel)
- const current=new Map(),original=new Map(),owned=new Map()
+ const current=new Map(),original=new Map(),owned=new Map(),readOnly=new Map()
  for(const rel of maintenanceTargets){
   const source=read(root,rel);if(source===null)continue
   current.set(rel,source)
@@ -34,14 +35,15 @@ function context(appDir){
   if(bridge){owned.set(rel,bridge);continue}
   original.set(rel,planSeamUninstall(source,{rel,owner:OWNER,parsed}).source)
  }
- return {root,pkg,current,original,owned}
+ for(const rel of maintenanceReadSources){const source=read(root,rel);if(source!==null)readOnly.set(rel,source)}
+  return {root,pkg,current,original,owned,readOnly}
 }
 export function prepareStandardSeams({appDir,operation='install'}={}){
  if(!['install','uninstall'].includes(operation))throw Error('接缝动作不合法')
  const ctx=context(appDir),after=new Map(ctx.current),records={},ownedRecords={}
  if(operation==='install'){
   // 所有必需锚点在内存中命中完成后才写盘，缺失/歧义不产生半装。
-  const writes=buildCore(ctx.root,ctx.original)
+  const writes=buildCore(ctx.root,new Map([...ctx.original,...ctx.readOnly]))
   for(const [rel,body]of writes){
    if(!maintenanceTargets.includes(rel))throw Error('接缝工厂目标未声明：'+rel)
    const bridge=ctx.owned.get(rel),current=ctx.current.get(rel)??null

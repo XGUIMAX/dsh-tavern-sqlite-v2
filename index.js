@@ -8,6 +8,7 @@
 // jsonl 停写是唯一路径。物理回退 = 还原 profiles/tavern/cordis.patch.yml
 // 备份 + 重启（jsonl 后端原样接管；已迁移会话数据在 .db，两源不互见须知）。
 import { createRequire } from "node:module"
+import { isDeepStrictEqual } from 'node:util'
 import { readdirSync, existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
@@ -72,7 +73,7 @@ const TAKEOVER_KEYS = [
 	"acquireLease", "acquireWriteLease",
 	"findLog", "requireStoredLog", "resolveCurrentLog", "readStoredLog",
 	"stat", "list", "locate",
-	"ensureMigrated", "readStored", "truncateEvents", "loadRollbackSession", "bindRollbackArchive", "setRollbackPending", "guardTurnStart", "assertWritable", "create", "open", "ensureRootEncoding",
+	"ensureMigrated", "readStored", "truncateEvents", "replaceRegeneratedTail", "loadRollbackSession", "bindRollbackArchive", "setRollbackPending", "guardTurnStart", "assertWritable", "create", "open", "ensureRootEncoding",
 	"dbSaveSessionPath", "dbSaveDrain", "dbSaveValidate", "dbSaveInstall", "dbSaveRemove", "dbSaveFinish", "dbSaveDeleteFootprint", "dbSaveCanDeleteDeferredPath", "drainOpenHandles"
 ]
 
@@ -379,6 +380,18 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		if (session === undefined) throw new SessionPersistenceNotFoundError(header.id)
 		const meta = session.truncateFrom(boundarySeq, identity,retainedEvents)
 		this.rewindOpenHandles(header.id, meta?.eventCount ?? 0)
+		return meta
+	}
+
+	/** 重生成专用尾替换：真实SQL同事务，旧写先drain，全部活动句柄回拨。 */
+	async replaceRegeneratedTail(header, keep, expectedTail, output) {
+		this.assertWritable(header.id)
+		await this.drainOpenHandles(header.id)
+		const session = this.store.openExisting(header.id)
+		if (session === undefined) throw new SessionPersistenceNotFoundError(header.id)
+		if (!isDeepStrictEqual(session.readMeta().header, header)) throw new Error('重生成会话身份已变化')
+		const meta = session.replaceRegeneratedTail(keep, expectedTail, output)
+		this.rewindOpenHandles(header.id, meta.eventCount)
 		return meta
 	}
 

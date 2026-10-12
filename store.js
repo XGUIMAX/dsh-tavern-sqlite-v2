@@ -194,6 +194,52 @@ export class SqliteSessionDb {
 		}
 	}
 
+	/**
+	 * 原生重生成的纯尾替换：同一 BEGIN IMMEDIATE 内校验并删除旧尾、连续写回新输出。
+	 * keep 为保留前缀事件数；expectedTail 必须是库内 seq>=keep 的实际事件（含 time，深等比较）；
+	 * output 必须自 seq=keep 起连续、data 为纯 JSON、引用只能指向保留前缀或本批更早输出。
+	 * 幂等：实际尾与 output 深等 ⇒ 零修改返回 meta；否则漂移一律拒（不删不改）。
+	 */
+	replaceRegeneratedTail(keep, expectedTail, output) {
+		if (!Number.isSafeInteger(keep) || keep < 1) throw new Error('重生成替换需 keep>=1 安全整数')
+		if (!Array.isArray(expectedTail) || !Array.isArray(output)) throw new Error('重生成替换需 expectedTail/output 数组')
+		this.db.exec("BEGIN IMMEDIATE")
+		try {
+			if (this.readMeta() === undefined) throw new Error('重生成替换：session 记录不存在')
+			const prefix = this.stmts.selectEventsFrom.all(0).map(rowToEvent)
+			if (prefix.length < keep) throw new Error('重生成替换：库内事件少于 keep')
+			for (let i = 0; i < keep; i++) if (prefix[i].seq !== i) throw new Error('重生成替换：保留前缀 seq 不连续')
+			const actualTail = prefix.slice(keep)
+			if (actualTail.length === output.length && actualTail.every((event, i) => isDeepStrictEqual(event, output[i]))) {
+				const unchanged = this.readMeta()
+				this.db.exec("COMMIT")
+				return unchanged
+			}
+			if (!isDeepStrictEqual(actualTail, expectedTail)) throw new Error('重生成替换：旧尾已漂移，拒绝删除')
+			const known = new Set(prefix.slice(0, keep).map(event => event.seq))
+			for (let i = 0; i < output.length; i++) {
+				const event = output[i]
+				if (!event || typeof event.type !== 'string' || event.type === '') throw new Error('重生成替换：输出事件缺少类型')
+				if (event.seq !== keep + i) throw new Error('重生成替换：输出 seq 必须连续（期望 ' + (keep + i) + '）')
+				if (event.data === null || typeof event.data !== 'object' || Array.isArray(event.data)) throw new Error('重生成替换：输出 data 必须是纯对象')
+				for (const ref of Array.isArray(event.sourceEventSeqs) ? event.sourceEventSeqs : []) {
+					if (!Number.isSafeInteger(ref) || ref < 0) throw new Error('重生成替换：引用 seq 非法')
+					if (!known.has(ref)) throw new Error('重生成替换：引用未保留或非本批更早输出：' + ref)
+				}
+				known.add(event.seq)
+			}
+			this.db.prepare("DELETE FROM events WHERE seq >= ?").run(keep)
+			for (const event of output) this.stmts.insertEvent.run(...rowToInsertArgs(event))
+			this.db.prepare("UPDATE sessions SET event_count = ?").run(keep + output.length)
+			const meta = this.readMeta()
+			this.db.exec("COMMIT")
+			return meta
+		} catch (error) {
+			this.db.exec("ROLLBACK")
+			throw error
+		}
+	}
+
 	/** 纯尾DELETE与唯一自身身份保存同事务；不是普通追加豁免，不关闭任何回退屏障。 */
 	truncateFrom(boundarySeq, identity, retainedEvents) {
 		if (!Number.isSafeInteger(boundarySeq) || boundarySeq < -1) throw new Error('回退SQL边界无效')

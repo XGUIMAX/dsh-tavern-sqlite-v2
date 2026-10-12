@@ -7,7 +7,7 @@ import {DatabaseSync} from 'node:sqlite'
 import path from 'node:path'
 import os from 'node:os'
 import {createChatSqliteStore} from '../chat-sqlite-store.js'
-import {captureRollbackBusinessState,restoreRollbackBusinessState} from '../lib/rollback-business-state.js'
+import {captureRollbackBusinessState,restoreRollbackBusinessState,resolveRollbackBusinessState} from '../lib/rollback-business-state.js'
 const copy=value=>value===undefined?undefined:structuredClone(value)
 const helpers={copyJsonTree:copy,applyJsonChangesShared:()=>{throw Error('本闸不调用patch')}}
 for(const key of ['projectSceneImageState','projectChatSessionState','projectDisplayRuntimeState','projectChatBackgroundConfig','projectSettlementCheckpoint'])helpers[key]=copy
@@ -26,7 +26,7 @@ async function fixture(run){
 }
 async function update(store,id,fn){return store.update(id,c=>{const result=fn(c)||c;result._storageRevision=c._storageRevision+1;return result})}
 const rows=db=>db.prepare('SELECT book_id,snapshot_json FROM archive_worldbook_history').all()
-const restore=(store,chat,before)=>restoreRollbackBusinessState(chat,before,copy,(state,ref)=>store.readRollbackWorldbook(state,ref))
+const restore=(store,chat,before)=>restoreRollbackBusinessState(chat,before,copy,(state,ref)=>store.readRollbackWorldbook(state,ref),(state,ref)=>store.readRollbackOperationSnapshot(state,ref))
 
 test('8轮不变书只存1历史版本；普通更新不插入、不写当前书，不展开历史',async()=>fixture(async({id,store,db})=>{
  db.exec('CREATE TABLE writes(kind TEXT); CREATE TRIGGER count_book AFTER INSERT ON archive_worldbook_history BEGIN INSERT INTO writes VALUES(\'history\'); END; CREATE TRIGGER count_head AFTER UPDATE ON archive_head_fields WHEN NEW.key=\'openingWorldbookSnapshot\' BEGIN INSERT INTO writes VALUES(\'head\'); END;')
@@ -107,6 +107,56 @@ test('历史插入及后续头写失败均同事务回滚；悬空写入拒绝�
  assert.deepEqual(await store.read(id),old);assert.equal(rows(db).length,1,'未知引用布局不能被当成无引用清表')
  const final=await update(store,id,c=>{c.openingWorldbookSnapshot=book('correct new');return attach(c,'t2')})
  assert.equal(rows(db).length,2);assert.deepEqual(restore(store,copy(final),final.timeline.checkpoints[1].businessBefore).openingWorldbookSnapshot,book('correct new'))
+}))
+
+test('账本前像SQL：缺节点冷读重建、连续回退、引用去重与回收',async()=>fixture(async({root,id,store,db})=>{
+ await update(store,id,c=>attach(c,'t1'))
+ await update(store,id,c=>{c.variables.hp=2;c.openingWorldbookSnapshot=book('第二轮历史');return attach(c,'t2')})
+ await update(store,id,c=>{c.variables.hp=3;return attach(c,'t3')})
+ const history=()=>db.prepare('SELECT operation_snapshot_id,snapshot_json FROM archive_operation_history ORDER BY operation_snapshot_id').all()
+ assert.equal(history().length,2,'每个不同操作前像只存一行，不按每个checkpoint重复')
+ for(const row of history()){
+  const value=JSON.parse(row.snapshot_json)
+  for(const ref of Object.values(value.businessBefore.operationPreimages||{}))assert.ok(Number.isSafeInteger(ref.operationSnapshotId),'存储前像仅留历史引用，不递归嵌套全文')
+ }
+ await update(store,id,c=>{delete c.timeline.operations.t1;delete c.timeline.operations.t2;c.timeline.checkpoints=c.timeline.checkpoints.filter(cp=>cp.turn===3);return c})
+ assert.equal(history().length,2,'只剩第三轮基准也须保留传递引用的历史')
+ assert.equal(rows(db).length,2,'传递引用中的世界书版本不得误回收')
+ const fresh=createChatSqliteStore({dataRoot:root,helpers})
+ try{
+  const current=await fresh.read(id),before=current.timeline.checkpoints[0].businessBefore
+  const restored=restore(fresh,copy(current),before)
+  assert.ok(restored.timeline.operations.t1.businessBefore)
+  assert.ok(restored.timeline.operations.t2.businessBefore)
+  assert.equal(restored.variables.hp,3)
+  const earlier=resolveRollbackBusinessState(restored,2,true)
+  const previous=restore(fresh,copy(restored),earlier)
+  assert.equal(previous.variables.hp,2)
+  const original=restore(fresh,copy(previous),resolveRollbackBusinessState(previous,1,true))
+  assert.equal(original.variables.hp,1)
+  assert.deepEqual(original.openingWorldbookSnapshot,big)
+  await update(fresh,id,()=>{previous.timeline.checkpoints=[];return previous})
+ }finally{fresh.dispose()}
+ const kept=await store.read(id)
+ assert.deepEqual(Object.keys(kept.timeline.operations),['t1'])
+ assert.equal(history().length,0,'已恢复成t1内联基准且无其它引用，前像表可全部回收')
+ assert.equal(rows(db).length,1,'仍被t1引用的原世界书保留')
+}))
+
+test('账本前像SQL：前像写入失败同事务回滚、错档与缺行不半恢复',async()=>fixture(async({id,store,db})=>{
+ const first=await update(store,id,c=>attach(c,'t1'))
+ db.exec("CREATE TRIGGER fail_preimage BEFORE INSERT ON archive_operation_history BEGIN SELECT RAISE(ABORT,'前像插入故障'); END")
+ await assert.rejects(update(store,id,c=>attach(c,'t2')),/前像插入故障/)
+ assert.deepEqual(await store.read(id),first)
+ assert.equal(db.prepare('SELECT COUNT(*) AS n FROM archive_operation_history').get().n,0)
+ db.exec('DROP TRIGGER fail_preimage')
+ const current=await update(store,id,c=>attach(c,'t2'))
+ const ref=current.timeline.checkpoints.at(-1).businessBefore.operationPreimages.t1
+ assert.throws(()=>store.readRollbackOperationSnapshot(current,{...ref,chatId:'wrong'}),/身份/)
+ const destination=copy(current),original=copy(destination),before=copy(current.timeline.checkpoints.at(-1).businessBefore)
+ before.operationPreimages.t1.operationSnapshotId=99999
+ assert.throws(()=>restore(store,destination,before),/快照行/)
+ assert.deepEqual(destination,original)
 }))
 
 test('新ID新timeline的档只复制当前完整书、不携带旧档引用',async()=>fixture(async({id,store,db})=>{

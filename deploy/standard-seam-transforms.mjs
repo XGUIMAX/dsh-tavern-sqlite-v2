@@ -9,12 +9,14 @@ import { applyOpeningRuntimeTransform } from './opening-runtime-transform.mjs'
 import { applyRollbackTransform } from './core-rollback-transform.mjs'
 import { applyModelErrorTransform } from './model-error-transform.mjs'
 import { applyCompactionWarningTransform } from './compaction-warning-transform.mjs'
+import { applyUpstreamFailureInputTransform, applyTemplateRollbackInputOrderTransform } from './upstream-failure-input-transform.mjs'
 import { applyDbSaveHostTransform, applyDbSaveFootprintTransform, applyDbSaveFootprintHostTransform } from './db-save-transform.mjs'
 import { applyRowHistoryTransform, applyRowTimelineTransform } from './row-rollback-transform.mjs'
 import { applySettlementRoundTransform } from './settlement-round-transform.mjs'
 import { applyRollbackBusinessTimelineTransform, applyRollbackBusinessTurnTransform } from './rollback-business-transform.mjs'
 import { applyRollbackWorldbookHistoryHostTransform } from './rollback-worldbook-history-transform.mjs'
 import { applyCleanRollbackTransform } from './clean-rollback-transform.mjs'
+import { applyRegenerationAdoptionTransform } from './regeneration-adoption-transform.mjs'
 import { applyRollbackSyncHandshakeTransform } from './rollback-sync-install-transform.mjs'
 import { applyRollbackSyncHostTransform } from './rollback-sync-author-transform.mjs'
 import { applyRollbackViewReaderTransform, applyRollbackLiveViewTransform } from './rollback-sync-state-transform.mjs'
@@ -84,9 +86,10 @@ export function buildCore(appDir, sourceFiles) {
     write.set('tavern-plugin/lib/index.js',applyPluginTaskHostTransform(write.get('tavern-plugin/lib/index.js')))
     write.set('tavern-plugin/lib/plugin-api.js',applyPluginTaskApiTransform(text(appDir,'tavern-plugin/lib/plugin-api.js')))
   }
+  write.set('tavern-plugin/lib/index.js', applyUpstreamFailureInputTransform(write.get('tavern-plugin/lib/index.js')))
   const saveHost = write.get('tavern-plugin/lib/index.js')
   if (saveHost.includes('  async function exportGameSave(') || saveHost.includes('// [dsh-tavern-db-save:v1]')) {
-    write.set('tavern-plugin/lib/index.js', applyDbSaveFootprintHostTransform(applyDbSaveHostTransform(saveHost)))
+    write.set('tavern-plugin/lib/index.js', applyDbSaveFootprintHostTransform(applyDbSaveHostTransform(saveHost, { sceneSlots: sourceFiles.has('tavern-plugin/lib/domain/scene-slots.js') })))
     if (present(DOMAIN + 'game-footprint.js')) write.set(DOMAIN + 'game-footprint.js', applyDbSaveFootprintTransform(text(appDir, DOMAIN + 'game-footprint.js')))
     write.set(DOMAIN + 'storage-db-save.js', shim("import { storagePackage } from './storage-package.js'\nexport const { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } = await storagePackage('db-save-exchange')\n"))
   }
@@ -107,9 +110,9 @@ export function buildCore(appDir, sourceFiles) {
   write.set(DOMAIN + 'file-resources.js',applyRollbackWorldbookBindingsFileTransform(text(appDir,DOMAIN+'file-resources.js')))
   write.set(DOMAIN + 'worldbook-library.js',applyRollbackWorldbookLibraryTransform(text(appDir,DOMAIN+'worldbook-library.js')))
   if(present(DOMAIN+'card-summary-cache.js'))write.set(DOMAIN+'card-summary-cache.js',applyWorldbookSummaryCacheTransform(text(appDir,DOMAIN+'card-summary-cache.js')))
-  write.set(DOMAIN + 'round-history.js', applyCleanRollbackTransform(applyRowHistoryTransform(applyRollbackTransform(text(appDir, DOMAIN + 'round-history.js')).text)))
+  write.set(DOMAIN + 'round-history.js', applyRegenerationAdoptionTransform(applyCleanRollbackTransform(applyRowHistoryTransform(applyRollbackTransform(text(appDir, DOMAIN + 'round-history.js')).text))))
   write.set(DOMAIN + 'story-timeline.js', applySettlementRoundTransform(applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(text(appDir, DOMAIN + 'story-timeline.js')))))
-  write.set(DOMAIN + 'turn-orchestration.js', applyRollbackBodyCommitTurnTransform(applyRollbackBodySignalTurnTransform(applyRollbackSharedBranchTurnTransform(applyRollbackBusinessTurnTransform(text(appDir, DOMAIN + 'turn-orchestration.js'))))))
+  write.set(DOMAIN + 'turn-orchestration.js', applyRollbackBodyCommitTurnTransform(applyRollbackBodySignalTurnTransform(applyRollbackSharedBranchTurnTransform(applyTemplateRollbackInputOrderTransform(applyRollbackBusinessTurnTransform(text(appDir, DOMAIN + 'turn-orchestration.js')))))))
   write.set(DOMAIN + 'settlement-jobs.js', applyRollbackBodyCommitJobsTransform(applySettlementQuiescenceTransform(text(appDir, DOMAIN + 'settlement-jobs.js'))))
   write.set(DOMAIN + 'foreground-handoff.js', applyRollbackBodyCommitHandoffTransform(applyRollbackBodySignalHandoffTransform(applyForegroundQuiescenceTransform(text(appDir, DOMAIN + 'foreground-handoff.js')))))
   write.set(DOMAIN + 'server-template-sync.js', applyTemplateQuiescenceTransform(text(appDir, DOMAIN + 'server-template-sync.js')))
@@ -146,7 +149,7 @@ export function buildCore(appDir, sourceFiles) {
   write.set(DOMAIN + 'opening-preparation.js', applyOpeningRuntimeTransform(text(appDir, DOMAIN + 'opening-preparation.js')))
   write.set(DOMAIN + 'storage-opening-runtime.js', shim("import { storagePackage } from './storage-package.js'\nimport { renderTavernMacros } from './tavern-macro-engine.js'\nconst impl = await storagePackage('opening-server-init')\nexport function initializeOpeningRuntime(options) {\n  return impl.initializeOpeningRuntime({ ...options, substituteMacros: (text, draft) => { const result = renderTavernMacros(text, { userName: draft.userName, charName: draft.card.name, localVariables: draft.chat.variables, globalVariables: draft.globalVariables || {} }); draft.chat.variables = result.localVariables; draft.globalVariables = result.globalVariables; return result.text } })\n}\n"))
   write.set(DOMAIN + 'storage-budgets.js', shim("import { storagePackage } from './storage-package.js'\nexport const { BUDGETS } = await storagePackage('budgets')\n"))
-  write.set(DOMAIN + 'storage-rollback.js', shim("import { storagePackage } from './storage-package.js'\nimport { sessionEvents } from './session-events.js'\nconst impl = await storagePackage('rollback-cleanup')\nimpl.configureRollbackCleanup({ sessionEvents })\nexport const { cleanupAfterRollback, cleanupRollbackHeadIndex, preflightRollback, preflightRollbackAtSeq, cleanupAfterRollbackAtSeq } = impl\nexport const { cleanRollback, inspectNativeFailureTail, readFailureEvidence } = await storagePackage('clean-rollback')\n"))
+  write.set(DOMAIN + 'storage-rollback.js', shim("import { storagePackage } from './storage-package.js'\nimport { sessionEvents } from './session-events.js'\nconst impl = await storagePackage('rollback-cleanup')\nimpl.configureRollbackCleanup({ sessionEvents })\nexport const { cleanupAfterRollback, cleanupRollbackHeadIndex, preflightRollback, preflightRollbackAtSeq, cleanupAfterRollbackAtSeq } = impl\nexport const { cleanRollback, inspectNativeFailureTail, readFailureEvidence } = await storagePackage('clean-rollback')\nexport const { createRegenerationAdoption } = await storagePackage('regeneration-adoption')\n"))
   write.set(DOMAIN + 'conversation-fork-point.js', shim("import { storagePackage } from './storage-package.js'\nimport { isRescuedHistoryMessage } from './chat-history-rescue.js'\nimport { assistantResultForTurn } from './session-turn-result.js'\nimport { sessionEvents } from './session-events.js'\nimport { assertConversationForkable } from './conversation-fork.js'\nconst impl = await storagePackage('conversation-fork-point')\nimpl.configureConversationForkPoint({ isRescuedHistoryMessage, assistantResultForTurn, sessionEvents, assertConversationForkable })\nexport const { conversationStateAtTurn, conversationForkBoundary } = impl\n"))
   write.set(DOMAIN + 'chat-history-rescue.js', shim("import { storagePackage } from './storage-package.js'\nexport const { rescueHistoryInput, isRescuedHistoryMessage, assertRescueHistoryEditable, rescueHistoryNotice } = await storagePackage('chat-history-rescue')\n"))
   write.set(DOMAIN + 'storage-fork-history.js', shim("import { storagePackage } from './storage-package.js'\nexport const { normalizeForkHistoryMarkers } = await storagePackage('fork-history-markers')\n"))

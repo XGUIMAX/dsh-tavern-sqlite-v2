@@ -2,8 +2,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { createDbSaveResourceTransfer, allDbSaveResourceValues } from '../lib/db-save-resource-transfer.js'
+// 作者真实模块按需加载：本地评审fixture存在才import；公开仓无这些目录时保持null，
+// 依赖叶以skip守卫跳过，不在他人clone上模块加载即崩。slot key合同仍只认作者原模块，不用本地重实现。
+let createPluginData = null, createPluginMedia = null, pluginMediaSession = null
+if (existsSync(new URL('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/plugin-data.js', import.meta.url))) {
+  ;({ createPluginData } = await import('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/plugin-data.js'))
+  ;({ createPluginMedia, pluginMediaSession } = await import('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/plugin-media.js'))
+}
+let authorSceneSlotKeys = null
+if (existsSync(new URL('../../../tmp/upstream-038c-review-20261012/fixture-tree/tavern-plugin/lib/domain/scene-slots.js', import.meta.url))) {
+  ;({ sceneSlotKeys: authorSceneSlotKeys } = await import('../../../tmp/upstream-038c-review-20261012/fixture-tree/tavern-plugin/lib/domain/scene-slots.js'))
+}
 
 // 官方完整纯模块（b741 lib/domain/card-preparation.js）字节级 fixture；唯一 import 是纯工具 inspectCardExtensions，
 // 测试内经 data URL 导入并把该 import 重写为本地 stub（不改 fixture 原字节 → SHA 可验；create/project/present 不依赖它）。
@@ -345,4 +356,199 @@ test('DB图卡与无raw快照规范一致性预检', async () => {
   deps.fileResources.originalCardPayload = async () => png({ name: '卡B' })
   const badWindow = await createDbSaveResourceTransfer(deps).capture({ chat: noRaw, tables, nativeEvents: [] })
   await assert.rejects(() => createDbSaveResourceTransfer(deps).validate({ files: badWindow.files, chat: noRaw, tables, nativeEvents: [] }), /规范不一致/)
+})
+
+test('上游1d45DB插件资源：真实作者数据媒体携带可见版本，新ID恢复及失败清理',{skip:!createPluginData&&'需要本地作者1d45评审fixture'},async()=>{
+ const f=fixture(), records=new Map(), savedFiles=[]
+ const store={readJson:async path=>structuredClone(records.get(path)??null),updateJson:async(path,change)=>{records.set(path,structuredClone(await change(structuredClone(records.get(path)??null))))},remove:async path=>records.delete(path)}
+ const pluginData=createPluginData({store}),pluginMedia=createPluginMedia({store})
+ f.deps.pluginData=pluginData;f.deps.pluginMedia=pluginMedia
+ f.deps.attachments.readFileStream=async function*(){yield Buffer.from('音频字节')}
+ f.deps.attachments.saveFile=async input=>{savedFiles.push(Buffer.from(input.data));return {attachmentId:'new-audio',name:input.name,bytes:input.data.length}}
+ await pluginData.saveTurn({chatId:f.chat.id,owner:'game',turn:1,key:f.k1,data:{score:2,text:'chat-a原字串'}})
+ await pluginData.saveTurn({chatId:f.chat.id,owner:'game',turn:1,key:'obsolete',data:{score:99}})
+ await pluginData.saveGame({chatId:f.chat.id,owner:'game',data:{level:3}})
+ await pluginData.updateSettings(f.chat.id,s=>{s.disabled=['other']})
+ const image={kind:'image',status:'ready',attachment:ref('att-1')},audio={kind:'audio',status:'ready',attachment:{attachmentId:'old-audio',name:'music.mp3',bytes:12}}
+ for(const item of [image,audio])await pluginMedia.attach({chatId:f.chat.id,sessionId:f.chat.sessionId,owner:'game',turn:1,key:f.k1,currentKey:f.k1,item})
+ await pluginMedia.attach({chatId:f.chat.id,sessionId:f.chat.sessionId,owner:'game',turn:1,key:'obsolete',currentKey:'obsolete',item:audio})
+ const before=await pluginData.snapshot(f.chat.id),mediaBefore=await pluginMedia.snapshot(f.chat.id)
+ const transfer=createDbSaveResourceTransfer(f.deps),captured=await transfer.capture({chat:f.chat,tables:f.tables,nativeEvents:[]})
+ await captured.assertStable()
+ const bundle=await transfer.validate({files:captured.files,chat:f.chat,tables:f.tables,nativeEvents:[]})
+ assert.equal(bundle.plugins.data.owners.game.turns.length,1);assert.equal(bundle.plugins.media.items.length,2)
+ assert.equal(bundle.pluginAttachments.length,2)
+ const target={chatId:'chat-plugin-new',sessionId:'session-plugin-new'},lease=await transfer.install(bundle,f.chat,target)
+ const data=await pluginData.snapshot(target.chatId),media=await pluginMedia.snapshot(target.chatId)
+ assert.equal(data.owners.game.turns[0].key,keyFor(target.chatId,1,'第一段正文'))
+ assert.deepEqual(data.owners.game.game,{level:3});assert.deepEqual(data.settings.disabled,['other'])
+ assert.equal(data.owners.game.turns[0].data.text,'chat-a原字串')
+ assert.equal(media.items.length,2);assert.ok(media.items.every(item=>item.key===keyFor(target.chatId,1,'第一段正文')&&item.id!==mediaBefore.items[0].id))
+ assert.ok(media.items.every(item=>pluginMediaSession(item.id)===target.sessionId),'媒体项ID必须绑定新原生会话')
+ assert.equal(media.items.find(item=>item.kind==='audio').attachment.attachmentId,'new-audio')
+ assert.equal(savedFiles[0].toString('utf8'),'音频字节')
+ assert.deepEqual(await pluginData.snapshot(f.chat.id),before);assert.deepEqual(await pluginMedia.snapshot(f.chat.id),mediaBefore)
+ const bad=structuredClone(bundle.plugins);bad.media.items[0].key='foreign'
+ const foreign=captured.files.map(file=>file.path==='plugins.json'?{...file,data:Buffer.from(JSON.stringify(bad))}:file)
+ await assert.rejects(()=>transfer.validate({files:foreign,chat:f.chat,tables:f.tables,nativeEvents:[]}),/非当前剧情版本/)
+ await assert.rejects(()=>transfer.validate({files:captured.files.filter(file=>file.path!=='plugin-files/0000.bin'),chat:f.chat,tables:f.tables,nativeEvents:[]}),/不存在的条目/)
+ await lease.rollback();assert.equal(await pluginData.snapshot(target.chatId),null);assert.equal(await pluginMedia.snapshot(target.chatId),null)
+ // 部分恢复失败必须清除两个作者副存储；清理其中之一出错也继续清另一个。
+ const brokenTarget={chatId:'chat-plugin-partial',sessionId:'session-plugin-partial'}
+ f.deps.pluginMedia={...pluginMedia,importInto:async input=>{await pluginMedia.importInto(input);throw Error('插件媒体恢复失败')}}
+ const hasCause=(error,pattern)=>pattern.test(error.message) || (error.errors || []).some(child=>hasCause(child,pattern))
+ await assert.rejects(()=>createDbSaveResourceTransfer(f.deps).install(bundle,f.chat,brokenTarget),error=>error instanceof AggregateError && hasCause(error,/插件媒体恢复失败/))
+ assert.equal(await pluginData.snapshot(brokenTarget.chatId),null);assert.equal(await pluginMedia.snapshot(brokenTarget.chatId),null)
+ f.deps.pluginMedia=pluginMedia
+ await pluginData.saveGame({chatId:target.chatId,owner:'existing',data:{keep:true}})
+ await assert.rejects(()=>createDbSaveResourceTransfer(f.deps).install(bundle,f.chat,target),error=>error instanceof AggregateError && hasCause(error,/目标已有插件副数据/))
+ assert.deepEqual((await pluginData.snapshot(target.chatId)).owners.existing.game,{keep:true})
+ await pluginData.saveGame({chatId:f.chat.id,owner:'game',data:{level:4}})
+ await assert.rejects(()=>captured.assertStable(),/已变化/)
+})
+
+test('上游2.6多插图slot：DB资源按slot闭包捕获校验安装，旧代无slot依赖拒包',{skip:!authorSceneSlotKeys&&'需要本地作者2.6评审fixture'},async()=>{
+ const f=fixture()
+ f.deps.sceneSlotKeys=authorSceneSlotKeys
+ const slots=authorSceneSlotKeys([f.k1])
+ const slotRecord=slot=>({key:slots[slot],turn:1,slot,addRequest:'黄昏的巷口',status:'succeeded',
+  versions:[{id:'v-slot-'+slot,attachment:ref('att-slot-'+slot),prompt:'巷口',anchor:'他站在巷口',plan:{anchor:'巷口'}}]})
+ const mainWithAudit={...f.sceneRecord,ownerPid:123,requests:{r1:{status:'succeeded'}}}   // 运行/审计字段照旧必须剔除
+ f.deps.gameFootprint.readSceneFiles=async()=>[
+  {path:f.k1+'.json',content:Buffer.from(JSON.stringify(mainWithAudit))},
+  {path:slots[1]+'.json',content:Buffer.from(JSON.stringify(slotRecord(1)))},
+  {path:slots[2]+'.json',content:Buffer.from(JSON.stringify(slotRecord(2)))},
+ ]
+ f.deps.attachments.readImage=async want=>({ref:ref(want.attachmentId),data:new Uint8Array([want.attachmentId.length,1,2])})
+ const transfer=createDbSaveResourceTransfer(f.deps)
+ const captured=await transfer.capture({chat:f.chat,tables:f.tables,nativeEvents:[]})
+ await captured.assertStable()
+ const bundle=await transfer.validate({files:captured.files,chat:f.chat,tables:f.tables,nativeEvents:[]})
+ const slotEntries=bundle.sceneFiles.filter(file=>file.record.slot)
+ assert.deepEqual(slotEntries.map(file=>file.record.slot).sort(),[1,2],'slot记录必须随包携带')
+ for(const file of slotEntries){
+  assert.equal(file.record.addRequest,'黄昏的巷口')
+  assert.equal(file.record.versions[0].anchor,'他站在巷口')
+  assert.equal(file.record.ownerPid,undefined)
+  assert.equal(file.record.requests,undefined)
+ }
+ assert.equal(bundle.sceneFiles.find(file=>file.record.key===f.k1).record.requests,undefined,'主图审计字段照旧剔除')
+ const target={chatId:'chat-26',sessionId:'session-26'}
+ const lease=await transfer.install(bundle,f.chat,target)
+ const newMain=keyFor(target.chatId,1,'第一段正文'),newSlots=authorSceneSlotKeys([newMain])
+ assert.equal(lease.sceneKeyMap.get(f.k1),newMain)
+ assert.equal(lease.sceneKeyMap.get(slots[1]),newSlots[1],'slot1必须映射到目标主key派生的slot1')
+ assert.equal(lease.sceneKeyMap.get(slots[2]),newSlots[2],'slot2必须映射到目标主key派生的slot2')
+ for(const slot of [1,2]){
+  const scenePath='scene-images/'+sha256(target.chatId)+'/'+newSlots[slot]+'.json'
+  const write=f.calls.writeBytes.find(([path])=>path===scenePath)
+  assert.ok(write,'slot记录必须写入新档路径：'+scenePath)
+  const stored=JSON.parse(write[1])
+  assert.equal(stored.key,newSlots[slot]);assert.equal(stored.slot,slot);assert.equal(stored.addRequest,'黄昏的巷口')
+  assert.notEqual(stored.versions[0].attachment.attachmentId,'att-slot-'+slot,'slot图附件必须换新')
+  assert.equal(stored.versions[0].anchor,'他站在巷口')
+  assert.equal(stored.diagnosticContext.chatId,target.chatId)
+ }
+ // 旧代host（无sceneSlotKeys依赖）：闭包校验必须拒绝含slot记录的包，不猜映射
+ delete f.deps.sceneSlotKeys
+ await assert.rejects(()=>createDbSaveResourceTransfer(f.deps).validate({files:captured.files,chat:f.chat,tables:f.tables,nativeEvents:[]}),/闭包外场景/)
+})
+
+test('上游2.6多插图slot：第三方按slot key登记的插件数据媒体随档重绑到目标slot',{skip:(!createPluginData||!authorSceneSlotKeys)&&'需要本地作者1d45/2.6评审fixture'},async()=>{
+ const f=fixture(),records=new Map(),savedFiles=[]
+ const store={readJson:async path=>structuredClone(records.get(path)??null),updateJson:async(path,change)=>{records.set(path,structuredClone(await change(structuredClone(records.get(path)??null))))},remove:async path=>records.delete(path)}
+ const pluginData=createPluginData({store}),pluginMedia=createPluginMedia({store})
+ f.deps.pluginData=pluginData;f.deps.pluginMedia=pluginMedia;f.deps.sceneSlotKeys=authorSceneSlotKeys
+ f.deps.attachments.readFileStream=async function*(){yield Buffer.from('slot音频')}
+ f.deps.attachments.saveFile=async input=>{savedFiles.push(Buffer.from(input.data));return {attachmentId:'new-slot-audio',name:input.name,bytes:input.data.length}}
+ const slots=authorSceneSlotKeys([f.k1])
+ await pluginData.saveTurn({chatId:f.chat.id,owner:'game',turn:1,key:slots[2],data:{note:'slot数据'}})
+ await pluginMedia.attach({chatId:f.chat.id,sessionId:f.chat.sessionId,owner:'game',turn:1,key:slots[2],currentKey:slots[2],item:{kind:'audio',status:'ready',attachment:{attachmentId:'old-slot-audio',name:'m.mp3',bytes:9}}})
+ const transfer=createDbSaveResourceTransfer(f.deps)
+ const captured=await transfer.capture({chat:f.chat,tables:f.tables,nativeEvents:[]})
+ const bundle=await transfer.validate({files:captured.files,chat:f.chat,tables:f.tables,nativeEvents:[]})
+ assert.ok(bundle.plugins.data.owners.game.turns.some(item=>item.key===slots[2]),'slot key回合数据必须进入可见闭包')
+ assert.ok(bundle.plugins.media.items.some(item=>item.key===slots[2]),'slot key媒体必须进入可见闭包')
+ const target={chatId:'chat-slot-new',sessionId:'session-slot-new'}
+ await transfer.install(bundle,f.chat,target)
+ const newSlots=authorSceneSlotKeys([keyFor(target.chatId,1,'第一段正文')])
+ const data=await pluginData.snapshot(target.chatId)
+ assert.deepEqual(data.owners.game.turns.map(item=>item.key),[newSlots[2]],'slot2数据必须重绑到目标slot2，不回落主key')
+ const media=await pluginMedia.snapshot(target.chatId)
+ assert.ok(media.items.length===1&&media.items[0].key===newSlots[2])
+ assert.equal(media.items[0].attachment.attachmentId,'new-slot-audio')
+ assert.equal(pluginMediaSession(media.items[0].id),target.sessionId)
+ assert.equal(savedFiles[0].toString('utf8'),'slot音频')
+ assert.equal((await pluginData.snapshot(f.chat.id)).owners.game.turns.some(item=>item.key===slots[2]),true,'源档不变')
+})
+
+test('上游2.6造型参考：references随包迁移逐槽重绑换附件，闭包外与失效绑定过滤，旧代拒包',{skip:!authorSceneSlotKeys&&'需要本地作者2.6评审fixture'},async()=>{
+ const f=fixture()
+ f.deps.sceneSlotKeys=authorSceneSlotKeys
+ const slots=authorSceneSlotKeys([f.k1])
+ const slot1={key:slots[1],turn:1,slot:1,addRequest:'黄昏',status:'succeeded',
+  versions:[{id:'v-s1',attachment:ref('att-slot-1'),prompt:'巷口',anchor:'他站在巷口',plan:{anchor:'巷口'}}]}
+ const person={id:'p1',name:'艾琳',description:'银发'}
+ const validNoId={person,source:{key:f.k1,turn:1,versionId:'v1',attachment:ref('att-1')},activation:{key:slots[1],turn:1},gateway:'volc',enabled:true,image:{mediaType:'image/png',digest:sha256('图内容')},at:123}
+ const valid={...validNoId,id:sha256Of(validNoId)}
+ // 作者取消绑定的持久形态：enabled:false + image:null 留档（bind 的 bytes = enabled ? digest : null），必须能随包迁移
+ const person2={id:'p2',name:'诺亚',description:''}
+ const disabledNoId={person:person2,source:{key:f.k1,turn:1,versionId:'v1',attachment:ref('att-1')},activation:{key:slots[1],turn:1},gateway:'volc',enabled:false,image:null,at:456}
+ const disabled={...disabledNoId,id:sha256Of(disabledNoId)}
+ const foreignRec={...valid,id:'foreign-id',source:{...valid.source,key:sha256('gone-key')}}   // source闭包外
+ const staleRec={...valid,id:'stale-id',source:{...valid.source,versionId:'v-none'}}           // 版本不存在
+ const doc={version:1,records:[valid,disabled,foreignRec,staleRec],revokedIds:['foreign-id','悬空id']}
+ f.deps.gameFootprint.readSceneFiles=async()=>[
+  {path:f.k1+'.json',content:Buffer.from(JSON.stringify(f.sceneRecord))},
+  {path:slots[1]+'.json',content:Buffer.from(JSON.stringify(slot1))},
+  {path:'references.json',content:Buffer.from(JSON.stringify(doc))},
+ ]
+ f.deps.attachments.readImage=async want=>({ref:ref(want.attachmentId),data:new Uint8Array([want.attachmentId.length,1,2])})
+ const transfer=createDbSaveResourceTransfer(f.deps)
+ const captured=await transfer.capture({chat:f.chat,tables:f.tables,nativeEvents:[]})
+ await captured.assertStable()
+ assert.ok(captured.files.some(file=>file.path==='references.json'),'造型参考必须进包')
+ const bundle=await transfer.validate({files:captured.files,chat:f.chat,tables:f.tables,nativeEvents:[]})
+ assert.deepEqual(bundle.references.records.map(record=>record.id),[valid.id,disabled.id],'闭包外与失效绑定必须被过滤，取消绑定的记录保留')
+ // 外来包防线：包内改成闭包外activation key → validate拒
+ const tampered=captured.files.map(file=>file.path==='references.json'
+  ?{...file,data:Buffer.from(JSON.stringify({...bundle.references,records:[{...valid,activation:{key:sha256('outside'),turn:1}}]}))}
+  :file)
+ await assert.rejects(()=>transfer.validate({files:tampered,chat:f.chat,tables:f.tables,nativeEvents:[]}),/造型参考/)
+ const target={chatId:'chat-ref',sessionId:'session-ref'}
+ const lease=await transfer.install(bundle,f.chat,target)
+ const newMain=keyFor(target.chatId,1,'第一段正文'),newSlots=authorSceneSlotKeys([newMain])
+ const referencesPath='scene-images/'+sha256(target.chatId)+'/references.json'
+ const write=f.calls.writeBytes.find(([path])=>path===referencesPath)
+ assert.ok(write,'目标必须写入references.json')
+ const stored=JSON.parse(write[1])
+ assert.equal(stored.version,1)
+ assert.equal(stored.records.length,2)
+ const record=stored.records[0]
+ assert.equal(record.source.key,newMain,'source key必须换到目标主key')
+ assert.equal(record.activation.key,newSlots[1],'activation key必须换到目标slot1')
+ assert.equal(record.person.name,'艾琳')
+ const sceneWrite=f.calls.writeBytes.find(([path])=>path==='scene-images/'+sha256(target.chatId)+'/'+newMain+'.json')
+ const sceneStored=JSON.parse(sceneWrite[1])
+ assert.equal(JSON.stringify(record.source.attachment),JSON.stringify(sceneStored.versions.find(version=>version.id==='v1').attachment),'附件必须与重写后场景版本深等（作者load()严格比对）')
+ const{id,...rest}=record
+ assert.equal(id,sha256Of(rest),'id必须按作者算法自洽重算')
+ const disabledStored=stored.records[1]
+ assert.equal(disabledStored.enabled,false,'取消绑定状态保留')
+ assert.equal(disabledStored.image,null,'取消绑定的image:null原样随包')
+ assert.equal(disabledStored.source.key,newMain)
+ const{id:id2,...dRest}=disabledStored
+ assert.equal(id2,sha256Of(dRest),'取消绑定记录id同样自洽')
+ assert.deepEqual(stored.revokedIds||[],[],'悬空撤销项必须清理')
+ await lease.rollback()
+ assert.ok(f.calls.remove.includes(referencesPath),'回滚必须回收references.json')
+ // 稳定窗口：references原始字节变化即拒
+ const originalRead=f.deps.gameFootprint.readSceneFiles
+ const mutated=JSON.parse(JSON.stringify(doc));mutated.records[0].at=999
+ f.deps.gameFootprint.readSceneFiles=async()=>[{path:f.k1+'.json',content:Buffer.from(JSON.stringify(f.sceneRecord))},{path:slots[1]+'.json',content:Buffer.from(JSON.stringify(slot1))},{path:'references.json',content:Buffer.from(JSON.stringify(mutated))}]
+ await assert.rejects(()=>captured.assertStable(),/造型参考/)
+ f.deps.gameFootprint.readSceneFiles=originalRead
+ // 旧代host（无sceneSlotKeys）：slot activation闭包校验拒绝，不猜映射
+ delete f.deps.sceneSlotKeys
+ await assert.rejects(()=>createDbSaveResourceTransfer(f.deps).validate({files:captured.files,chat:f.chat,tables:f.tables,nativeEvents:[]}),/闭包外场景/)
 })

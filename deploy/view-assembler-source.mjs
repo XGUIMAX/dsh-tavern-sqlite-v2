@@ -18,7 +18,7 @@ export function viewAssemblerSource(source) {
   const fields = returns[0].argument
   const names = fields.properties.filter(p=>p.type==='Property').map(p=>p.key.name || p.key.value)
   for (const key of ['chatId','tavernHelper','tavernStatusViews','activity','settleStatus']) if (!names.includes(key)) throw Error('作者最终view字段合同缺失：'+key)
-  const values = ['chat','card','str','deferResources','resourceRevision','activePresetSnapshot','cardUpdate','debugTurns','latestAssistantMessageId','forkTurnsByMessageId','latestStoryTurn','inputSources','inputTemplateDisplays','rollbackFields','replyDisplay','helperContext','helperWorldbook','cardExtensions','helperRuntime','runtimeSettings','activity','scriptProgress',
+  const values = ['chat','card','str','deferResources','resourceRevision','activePresetSnapshot','cardUpdate','debugTurns','latestAssistantMessageId','forkTurnsByMessageId','latestStoryTurn','inputSources','inputTemplateDisplays','rollbackFields','replyDisplay','helperContext','helperWorldbook','cardExtensions','helperRuntime','runtimeSettings','activity','scriptProgress', 'contextCompaction',
     'cardViewOf','sessionResources','readLedger','manualLedger','projectCharacterDesignDocument','manualCharacterDesign','phoneChat','mvuReceiptsOf','sessionOpeningDescriptor','readPromptTemplateGlobalVariables','TAVERN_COMPATIBILITY_CAPABILITIES','tavernExtensionSettings','OFFICIAL_MVU_VERSION','TAVERN_RELEASE_CAPABILITIES','rescueHistoryNotice','settlementTurn']
   // debugTurns 新旧作者兼容（不改作者 index 本体，只在生成的 fields 片段内以源码区间 splice）：
   // 旧作者 `debugTurns.slice(-12).reverse()`（末尾12条再倒序）与新作者裸 `debugTurns`（已最新优先）统一输出
@@ -36,10 +36,17 @@ export function viewAssemblerSource(source) {
     && debugValue.arguments.length === 0 && !debugValue.callee.computed && !sliceCall.callee.computed
     && sliceCall.arguments?.length === 1 && source.slice(sliceCall.arguments[0].start, sliceCall.arguments[0].end) === '-12'
   if (!bare && !legacy) throw Error('作者最终view的debugTurns字段形状未知（须为裸 debugTurns 或 debugTurns.slice(-N).reverse()）')
-  let fieldsText = source.slice(fields.start, fields.end)
-  if (legacy) {
-    const from = debugValue.start - fields.start, to = debugValue.end - fields.start
-    fieldsText = fieldsText.slice(0, from) + 'debugTurns' + fieldsText.slice(to)
-  }
+ let fieldsText = source.slice(fields.start, fields.end)
+  const edits = []
+  // 仅旧作者需要把 debugTurns.slice(-N).reverse() 换成裸值；新作者裸 debugTurns 不动。
+  if (legacy) edits.push({start: debugValue.start - fields.start, end: debugValue.end - fields.start, text: 'debugTurns'})
+  // contextCompaction 的 AST value 一律改为裸标识符（由 values 注入）：不把 projectCompactionWarning/ctx 表达式复制进独立模块。
+  const compactionProps = fields.properties.filter(p=>p.type==='Property' && (p.key.name || p.key.value) === 'contextCompaction')
+  if (compactionProps.length !== 1) throw Error('作者最终view的contextCompaction字段不唯一或缺失')
+  const compactionValue = compactionProps[0].value
+  edits.push({start: compactionValue.start - fields.start, end: compactionValue.end - fields.start, text: 'contextCompaction'})
+  // 按 start 降序一次 splice，避免前一次替换导致后续区间偏移。
+  edits.sort((a,b)=>b.start-a.start)
+  for (const edit of edits) fieldsText = fieldsText.slice(0, edit.start) + edit.text + fieldsText.slice(edit.end)
   return 'export async function assembleTavernView(values) {\nconst {' + values.join(',') + '} = values\nreturn ' + fieldsText + '\n}\n'
 }

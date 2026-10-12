@@ -9,6 +9,10 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createChatSqliteStore } from '../chat-sqlite-store.js'
 import { readActivitySummary, activityFromSmallRows } from '../lib/chat-query-service.js'
+import { readFileSync } from 'node:fs'
+import { parse } from '../lib/vendor/acorn/acorn.mjs'
+import { createTaskStateReader } from '../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/task-state-reader.js'
+import { createTavernPluginApi } from '../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/plugin-api.js'
 
 const AUTHOR25 = '../../../tmp/upstream25-author-fixture/src/dsh-tavern-5d2ffacf4231c9f45dc641b9db9e0286c4fa5f60/tavern-plugin/lib/domain/'
 const AUTHOR68215 = new URL('../../../tmp/release-034-20261008/author-fixture/src/dsh-tavern-68215e47516637e00c75d2b4bba3192679559425/tavern-plugin/lib/domain/', import.meta.url)
@@ -286,4 +290,23 @@ test('activityFromSmallRows在数字键与interrupted结算下与作者一致', 
   const mine = activityFromSmallRows({ operations: chat.timeline.operations, branchId: 'b', revision: 5 })
   assert.deepEqual(mine, coordinator.activity(chat), '数字键顺序与 interrupted+settlement ⇒ reason 必须一致')
   assert.equal(mine.reason, 'interrupted')
+})
+
+test('上游1d45新API活动：真实SQL读头供taskStateReader及getTurnState反映当前活动',async t=>{
+ const f=fixture(t),sessionId='session-activity-fixture'
+ await f.store.update(f.chatId,()=>CHAT(f.chatId))
+ let fallbacks=0
+ const reader=createTaskStateReader({readSlice:(id,indices,fields)=>f.store.readSlice(id,indices,fields),readState:id=>f.store.readSessionState(id),headerForSession:async(id,fields)=>(await f.store.readSlice(f.chatId,[],fields)).chat,stateForSession:async()=>{fallbacks++;return f.store.readSessionState(f.chatId)}})
+ const source=readFileSync(new URL('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/index.js',import.meta.url),'utf8'),ast=parse(source,{ecmaVersion:'latest',sourceType:'module'})
+ let node;const walk=n=>{if(!n||typeof n!=='object')return;if(n.type==='Property'&&n.key?.name==='readActivity')node=n.value;for(const v of Object.values(n))if(Array.isArray(v))v.forEach(walk);else if(v&&typeof v==='object')walk(v)};walk(ast)
+ assert.ok(node)
+ let phase='running'
+ const readActivity=new Function('taskStateReader','backgroundTasks','agentRegistry','str','return ('+source.slice(node.start,node.end)+')')(reader,{activity:chat=>activityFromSmallRows({operations:chat.timeline.operations,branchId:chat.timeline.branchId,revision:chat.timeline.revision})},{get:()=>({phase:{kind:phase}})},String)
+ const api=createTavernPluginApi({resolveGame:async()=>({chatId:f.chatId,sessionId}),readPendingTurn:async()=>({turn:6,key:'text-key',greeting:true}),readLatestSettledTurn:async()=>({turn:6,key:'text-key'}),readActivity})
+ const state=await api.service.getTurnState({gameId:sessionId})
+ assert.equal(state.generating,true);assert.equal(state.settling,true);assert.equal(state.busy,true);assert.equal(state.settled,true);assert.equal(state.greeting,true);assert.equal(fallbacks,0)
+ phase='idle'
+ await f.store.update(f.chatId,chat=>{chat._storageRevision++;chat.timeline.operations={};return chat})
+ const idle=await api.service.getTurnState({gameId:sessionId})
+ assert.equal(idle.busy,false);assert.equal(idle.settling,false);assert.equal(fallbacks,0)
 })

@@ -66,15 +66,40 @@ test('真实作者lib/index按源码序施完全部前置Host缝后，本档书�
  const next=applyRollbackWorldbookHistoryHostTransform(before)
  assert.equal(next.split('// [dsh-tavern-worldbook-history-host:v1]').length-1,1)
  // 时间线两callback：当前书ref捕获 + 所选历史读取。
- assert.match(next,/createStoryTimeline\(\{ id: uid, now: Date.now, readRollbackWorldbook: \(chat, ref\) => chatJournalStore\.readRollbackWorldbook\(chat, ref\), readRollbackWorldbookRef: chat => chatJournalStore\.readCurrentRollbackWorldbookRef\(chat\) \}\)/)
+ assert.match(next,/createStoryTimeline\(\{ id: uid, now: Date.now, readRollbackWorldbook: \(chat, ref\) => chatJournalStore\.readRollbackWorldbook\(chat, ref\), readRollbackWorldbookRef: chat => chatJournalStore\.readCurrentRollbackWorldbookRef\(chat\), readRollbackOperationSnapshot: \(chat, ref\) => chatJournalStore\.readRollbackOperationSnapshot\(chat, ref\) \}\)/)
  assert.equal(next.split('readRollbackWorldbookRef: chat => chatJournalStore.readCurrentRollbackWorldbookRef(chat)').length-1,1)
  assert.equal(next.split('readRollbackWorldbook: (chat, ref) => chatJournalStore.readRollbackWorldbook(chat, ref)').length-1,1)
  // 回退业务消费者chats面暴露历史读取，且仍保留原有rollbackArchivePath。
- assert.match(next,/rollbackArchivePath: chatJournalStore\.rollbackArchivePath, readRollbackWorldbook: chatJournalStore\.readRollbackWorldbook \},/)
- assert.equal(next.split('readRollbackWorldbook: chatJournalStore.readRollbackWorldbook }').length-1,1)
+ assert.match(next,/rollbackArchivePath: chatJournalStore\.rollbackArchivePath, readRollbackWorldbook: chatJournalStore\.readRollbackWorldbook, readRollbackOperationSnapshot: chatJournalStore\.readRollbackOperationSnapshot \},/)
+ assert.equal(next.split('readRollbackWorldbook: chatJournalStore.readRollbackWorldbook,').length-1,1)
+ assert.equal(next.split('readRollbackOperationSnapshot: chatJournalStore.readRollbackOperationSnapshot },').length-1,1)
  // 幂等：二次apply返回同一字符串。
  assert.equal(applyRollbackWorldbookHistoryHostTransform(next),next)
  // 残缺：标记在但消费者不全时拒绝，不静默放过。
  assert.throws(()=>applyRollbackWorldbookHistoryHostTransform(next.replace('readCurrentRollbackWorldbookRef','missing')),/不完整/)
- assert.throws(()=>applyRollbackWorldbookHistoryHostTransform(next.replace('readRollbackWorldbook: chatJournalStore.readRollbackWorldbook }','readRollbackWorldbook: missing }')),/不完整/)
+ assert.throws(()=>applyRollbackWorldbookHistoryHostTransform(next.replace('readRollbackWorldbook: chatJournalStore.readRollbackWorldbook, readRollbackOperationSnapshot: chatJournalStore.readRollbackOperationSnapshot },','readRollbackWorldbook: missing, readRollbackOperationSnapshot: chatJournalStore.readRollbackOperationSnapshot },')),/不完整|未命中|不唯一/)
+})
+test('本档书历史：旧 marker 升级补前像读口、幂等，缺原世界书 callback 仍拒',()=>{
+ const legacy=[
+  '// [dsh-tavern-worldbook-history-host:v1]',
+  'const storyTimeline = createStoryTimeline({ id: uid, now: Date.now, readRollbackWorldbook: (chat, ref) => chatJournalStore.readRollbackWorldbook(chat, ref), readRollbackWorldbookRef: chat => chatJournalStore.readCurrentRollbackWorldbookRef(chat) })',
+  'const chats = { rollbackArchivePath: chatJournalStore.rollbackArchivePath, readRollbackWorldbook: chatJournalStore.readRollbackWorldbook },',
+ ].join('\n')
+ const upgraded=applyRollbackWorldbookHistoryHostTransform(legacy)
+ assert.match(upgraded,/readRollbackOperationSnapshot: \(chat, ref\) => chatJournalStore\.readRollbackOperationSnapshot\(chat, ref\)/)
+ assert.match(upgraded,/readRollbackWorldbook: chatJournalStore\.readRollbackWorldbook, readRollbackOperationSnapshot: chatJournalStore\.readRollbackOperationSnapshot \},/)
+ assert.equal(applyRollbackWorldbookHistoryHostTransform(upgraded),upgraded,'新 marker 必须幂等')
+ assert.throws(()=>applyRollbackWorldbookHistoryHostTransform(legacy.replace('readRollbackWorldbook: chatJournalStore.readRollbackWorldbook','missing')),/未命中|不唯一|不完整/)
+})
+
+test('账本前像：真实timeline出口统一第五参 readRollbackOperationSnapshot，旧四参不残留且幂等',()=>{
+ const original=readFileSync(new URL('../../../tmp/upstream-audit-20261003/head/tavern-plugin/lib/domain/story-timeline.js',import.meta.url),'utf8')
+ const transformed=applyRollbackBusinessTimelineTransform(applyRowTimelineTransform(original))
+ // 真实作者源已走 singleBusinessBaseline ⇒ 恢复入口是 businessBaseline，不是 checkpoint 直调。
+ assert.ok(transformed.includes('restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook, options.readRollbackOperationSnapshot)'),'businessBaseline 调用必须带第五参')
+ assert.equal(transformed.includes('restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook)'),false,'旧四参 businessBaseline 调用不得残留（缺第五参必须拒绝）')
+ assert.ok(transformed.includes('options.readRollbackOperationSnapshot)'),'出口必须统一带前像读口')
+ assert.equal(applyRollbackBusinessTimelineTransform(transformed),transformed,'已施新版必须幂等')
+ const oldStyle=transformed.replace('restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook, options.readRollbackOperationSnapshot)','restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook)')
+ assert.equal(applyRollbackBusinessTimelineTransform(oldStyle),transformed,'旧版输入必须升级到同一出口')
 })

@@ -9,8 +9,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSessionWindowProjector, REQUIRED_FUNCTIONS, REQUIRED_VALUES } from '../lib/session-window-projector.js'
-import { applyNativeDataTransform, ANCHORS, REQUIRED_BLOCKS, isNativeDataApplied } from '../deploy/native-data-transform.mjs'
+import { applyNativeDataTransform, ANCHORS, REQUIRED_BLOCKS, isNativeDataApplied, DEFAULT_DEPS_EXPRESSION } from '../deploy/native-data-transform.mjs'
 import { viewAssemblerSource } from '../deploy/view-assembler-source.mjs'
+import { projectCompactionWarning } from '../lib/compaction-warning.js'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -70,6 +71,7 @@ export function buildDeps(fixture) {
   const helperContext = { messages: [{ message_id: 0, role: 'assistant' }, { message_id: 2, role: 'assistant' }], turnMessageIds: { 1: 0, 2: 2 } }
   const deps = {
     assembleTavernView,
+    projectCompactionState: track('projectCompactionState', chat => chat.contextCompaction || null),
     str: value => (value === undefined || value === null ? '' : String(value)),
     readTavernSettings: track('readTavernSettings', async () => ({ trustedCardMode: false, frameSizing: 'fill' })),
     readScript: track('readScript', async () => undefined),
@@ -379,4 +381,52 @@ test('冷窗口：skeletonUntil真值与coldWindow边界一致且真实project�
   assert.equal(deps.__calls.includes('projectTavernHelperContext'), true, '前置：本次 project 必须真的走到作者 helper 上下文投影')
   assert.equal(capturedIndexed, true, 'projectTavernHelperContext 必须以 indexed:true 调用')
   assert.equal(captured, Math.max(0, fixture.chat.messages.length - 1), 'skeletonUntil 必须＝max(0, messages.length - helperMessageColdWindow)')
+})
+
+test('状态组装警告：旧native接缝升级补Host回调且幂等',async()=>{
+ const original=fs.readFileSync(AUTHOR_INDEX,'utf8')
+ const projectorImportPath=path.join(PKG,'lib','session-window-projector.js')
+ const upgraded=applyNativeDataTransform(original,{projectorImportPath})
+ assert.ok(upgraded.includes('projectCompactionState: chat => projectCompactionWarning(chat.contextCompaction, ctx.llm.listProviders())'),'新接缝必须补 Host 回调')
+ // 删掉唯一那行回调，模拟已施旧 marker 的现场文本
+ const lines=upgraded.split('\n')
+ const kept=lines.filter(line=>!line.includes('projectCompactionState: chat => projectCompactionWarning'))
+ assert.equal(lines.length-kept.length,1,'projectCompactionState 回调行必须唯一')
+ const old=kept.join('\n')
+ const re=applyNativeDataTransform(old,{projectorImportPath})
+ assert.equal(re,upgraded,'旧 marker 升级必须恢复同一 Host 回调文本')
+ assert.equal(applyNativeDataTransform(re,{projectorImportPath}),re,'已升级文本复跑必须幂等')
+ assert.ok(re.includes('projectCompactionState: chat => projectCompactionWarning(chat.contextCompaction, ctx.llm.listProviders())'),'旧 marker 必须被升级补回 Host 回调')
+ // 惰性：只取该 getter 的 callback 并 live 读取 providers，不执行全部 deps getter
+ const build=new Function('projectCompactionWarning','ctx','return ('+DEFAULT_DEPS_EXPRESSION+').projectCompactionState')
+ let calls=0,warn=projectCompactionWarning
+ const fn=build((state,providers)=>{calls+=1;return warn(state,providers)},{llm:{listProviders:()=>[{id:'x'}]}})
+ const state={warning:'no adapter registered for provider "x"'}
+ const first=fn({contextCompaction:state})
+ assert.equal(calls,1,'providers 必须每次 live 读取')
+ assert.equal(first.warning,'','providers 命中真实 id 后 callback 必须清空警告')
+})
+
+test('状态组装警告：Host投影传递且每次重算不修改chat',async()=>{
+ const fixture=buildFixture()
+ const deps=buildDeps(fixture)
+ const providers=[]
+ let reads=0
+ deps.projectCompactionState=chat=>{reads+=1;return projectCompactionWarning(chat.contextCompaction,providers)}
+ const projector=createSessionWindowProjector(deps)
+ fixture.chat.contextCompaction={warning:'no adapter registered for provider "x"',operation:{status:'completed'}}
+ const original=JSON.stringify(fixture.chat.contextCompaction)
+ const first=await projector.project({chat:fixture.chat,window:fixture.window,activity:fixture.activity,resourceKey:'window-5'})
+ assert.equal(first.kind,'value','project 必须返回 {kind, view}')
+ assert.equal(first.view.contextCompaction.warning,'no adapter registered for provider "x"','providers 为空时必须保留警告')
+ providers.push({id:'x'})
+ const second=await projector.project({chat:fixture.chat,window:fixture.window,activity:fixture.activity,resourceKey:'window-5'})
+ assert.equal(second.kind,'value')
+ assert.equal(second.view.contextCompaction.warning,'','同一 resourceKey 也必须重算并清掉已可路由的警告')
+ assert.equal(JSON.stringify(fixture.chat.contextCompaction),original,'Host 投影不得修改 chat 上的原对象')
+ assert.equal(reads,2,'每次 project 都必须真实调用一次真实 projectCompactionWarning')
+ fixture.chat.contextCompaction={warning:'no adapter registered for provider "x"',operation:{status:'running'}}
+ const third=await projector.project({chat:fixture.chat,window:fixture.window,activity:fixture.activity,resourceKey:'window-6'})
+ assert.equal(third.kind,'value')
+ assert.equal(third.view.contextCompaction.warning,'no adapter registered for provider "x"','非 completed operation 的警告必须保留（真实压缩待用户处理）')
 })

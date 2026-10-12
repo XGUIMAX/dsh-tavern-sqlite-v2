@@ -9,6 +9,13 @@ import { DatabaseSync } from 'node:sqlite'
 import { restoreDatabase, inspectDatabase, decodeDbSave, encodeDbSave } from '../lib/db-save-codec.js'
 import { createDbSaveExchange, createDbSaveRegistration } from '../lib/db-save-exchange.js'
 import { createDbSaveResourceTransfer } from '../lib/db-save-resource-transfer.js'
+// 作者真实模块按需加载：本地评审fixture存在才import；公开仓无该目录时保持null，
+// 依赖它的叶（pluginScenario）仅在本地fixture齐全的机器上运行，不在他人clone上加载即崩。
+let createPluginData = null, createPluginMedia = null
+if (existsSync(new URL('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/plugin-data.js', import.meta.url))) {
+  ;({ createPluginData } = await import('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/plugin-data.js'))
+  ;({ createPluginMedia } = await import('../../../tmp/upstream-1d45-review-20261012/author-tree/tavern-plugin/lib/domain/plugin-media.js'))
+}
 const CHAT = 'chat-dummy-source', SESSION = 'session-dummy-source', SIDE = 'session-dummy-background', OTHER = 'chat-dummy-other'
 const CARD = { name: '合成人物卡' }
 // 与作者 scene-illustration.js L22 同形的纯 hash（sha256 hex）；不 import 作者模块、不执行源码。
@@ -51,7 +58,7 @@ export function nativeFixture(id = SESSION, { attachment = false } = {}) {
     : { turn: 1, text: '保留源标识 ' + SESSION }
   return { meta: [{ key: 'schema_version', value: '1' }], sessions: [{ id, header_json: JSON.stringify({ id, version: 1, createdAt: 1, cwd: '/source', ...(id === SIDE ? { parentSession: SESSION } : {}) }), format_version: 1, created_at: 1, inherited_event_count: 0, event_count: 2 }], events: [{ seq: 0, type: 'turn/start', time: 1, data_json: '{"turn":1}', extra_json: null }, { seq: 1, type: 'turn/end', time: 2, data_json: JSON.stringify(end), extra_json: null }] }
 }
-export function fixture(t, { failPublish = false, brokenCard = false, onFirstValidate, resourceScenario = false } = {}) {
+export function fixture(t, { failPublish = false, brokenCard = false, onFirstValidate, resourceScenario = false, pluginScenario = false } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'dsh-db-save-fixture-'))
   const archivePath = id => path.join(root, 'chats', id, 'archive.db'), nativePath = id => path.join(root, 'sessions', id + '.db')
   mkdirSync(path.dirname(archivePath(CHAT)), { recursive: true }); mkdirSync(path.join(root, 'sessions'))
@@ -110,7 +117,11 @@ export function fixture(t, { failPublish = false, brokenCard = false, onFirstVal
     const prefix = chat.messages.slice(0, index).map(item => [item.role, item.turn, item.sourceText ?? item.text])
     return { key: hashHex(JSON.stringify([chat.id, prefix, index, target, swipeId, sourceDigest])), turn: target, swipeId, sourceDigest, source }
   }
+  const pluginState=new Map()
+  const pluginStore={readJson:async path=>structuredClone(pluginState.get(path)??null),updateJson:async(path,change)=>{pluginState.set(path,structuredClone(await change(structuredClone(pluginState.get(path)??null))))},remove:async path=>pluginState.delete(path)}
+  const pluginData=createPluginData?createPluginData({store:pluginStore}):null,pluginMedia=createPluginMedia?createPluginMedia({store:pluginStore}):null
   const resourceTransfer = createDbSaveResourceTransfer({
+    ...(pluginScenario ? {pluginData,pluginMedia} : {}),
     fileResources, profileData, gameFootprint, attachments,
     readChatCard: async cardPath => ({ ...CARD, raw: { ...CARD }, cardPath }),
     importCard: async payload => { cardPayloads.push(payload); const file = 'cards/' + payload.name; bytes.set(file, Buffer.from(payload.text)); return { path: file } },
@@ -162,7 +173,7 @@ export function fixture(t, { failPublish = false, brokenCard = false, onFirstVal
     unpublish: async identity => { unpublished.push(identity); await registration.discard(identity) },
     attach: async id => attached.push(id), detach: async id => detached.push(id), dataRoot: root
   })
-  return { engine, root, archivePath, nativePath, installs, finished, removed, attached, detached, published, unpublished, attempted, registrationState, bytes, images, worldbooks, materials, cardPayloads }
+  return { pluginData, pluginMedia, pluginState, computeSceneTarget, engine, root, archivePath, nativePath, installs, finished, removed, attached, detached, published, unpublished, attempted, registrationState, bytes, images, worldbooks, materials, cardPayloads }
 }
 test('DB自含正文包新双ID导入源不变', async t => {
   const f = fixture(t), before = readFileSync(f.archivePath(CHAT)), nativeBefore = readFileSync(f.nativePath(SESSION))

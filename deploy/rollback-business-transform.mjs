@@ -5,6 +5,16 @@ function once(source, old, next) {
   return source.replace(old,next)
 }
 export function applyRollbackBusinessTimelineTransform(source) {
+  const oldCheckpoint='restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone, options.readRollbackWorldbook)'
+  const oldBaseline='restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook)'
+  const newCheckpoint='restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone, options.readRollbackWorldbook, options.readRollbackOperationSnapshot)'
+  const newBaseline='restoreRollbackBusinessState(chat, businessBaseline, clone, options.readRollbackWorldbook, options.readRollbackOperationSnapshot)'
+  // 内部锚点一律保持旧四参：先把已施新版正规化回旧样子，跑完再在出口统一补第五参。
+  const normalized=source.replaceAll(newCheckpoint,oldCheckpoint).replaceAll(newBaseline,oldBaseline)
+  const transformed=timelineTransform(normalized)
+  return transformed.replaceAll(oldCheckpoint,newCheckpoint).replaceAll(oldBaseline,newBaseline)
+}
+function timelineTransform(source) {
   if (source.includes('// [dsh-tavern-single-business-baseline:v1]')) return singleBusinessBaseline(source)
   const importLine = "import { captureRollbackBusinessState, restoreRollbackBusinessState } from './storage-rollback-business.js'"
   const historyCall='restoreRollbackBusinessState(chat, checkpoint.businessBefore, clone, options.readRollbackWorldbook)'

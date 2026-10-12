@@ -4,6 +4,21 @@ export const DB_SAVE_DELETE_ANCHOR = '  async function deleteChat(chatId) {'
 const DB_SAVE_DELETE_CALL = "    if (footprint) footprint.items.push(...ctx.get('sessionPersistence').dbSaveDeleteFootprint(chatId, [footprint.foregroundSessionId, ...(footprint.backgroundSessionIds || [])], chatJournalStore.rollbackArchivePath(chatId)))\n"
 const DB_SAVE_REQUIRED = ['const dbSaveExchange = createDbSaveExchange({', 'const dbSaveRegistration = createDbSaveRegistration({ store: profileData })', 'unpublish: identity => dbSaveRegistration.discard(identity)', 'return await dbSaveExchange.exportGameSave(sessionId, options)', 'return await dbSaveExchange.importGameSave(args)', 'resources: dbSaveResources,', 'const dbSaveResources = createDbSaveResourceTransfer({', "validateCard: async payload => { const card = await cardPreparation.create({ kind: 'import', payload }); return { raw: cardPreparation.present({ card, as: 'raw' }), definition: cardPreparation.project(card) } }", 'await tavernScriptHostAdapter.whenIdle(chat.sessionId)']
 const DB_SAVE_DELETE_REQUIRED = 'dbSaveDeleteFootprint(chatId, [footprint.foregroundSessionId'
+const DB_SAVE_SCENE_SLOT_IMPORT = "import { sceneSlotKeys as dbSaveSceneSlotKeys } from './domain/scene-slots.js'\n"
+const DB_SAVE_SCENE_SLOT_BINDING = '    sceneSlotKeys: dbSaveSceneSlotKeys,\n'
+function applySceneSlotDependency(source, enabled) {
+  const hasImport = source.includes(DB_SAVE_SCENE_SLOT_IMPORT.trim())
+  const hasBinding = source.includes(DB_SAVE_SCENE_SLOT_BINDING.trim())
+  if (!enabled) return source
+  let next = source
+  if (!hasImport) next = DB_SAVE_SCENE_SLOT_IMPORT + next
+  if (!hasBinding) {
+    const anchor = '    readChatCard, importCard, computeSceneTarget,\n'
+    if (next.split(anchor).length !== 2) throw Error('DB交换slot接缝缺少资源工厂锚点')
+    next = next.replace(anchor, anchor + DB_SAVE_SCENE_SLOT_BINDING)
+  }
+  return next
+}
 function unique(source, text, label) {
   const count = source.split(text).length - 1
   if (count !== 1) throw Error('DB交换接缝锚点不唯一：' + label + '（' + count + '）')
@@ -16,15 +31,16 @@ export function applyDbSaveDeleteTransform(source) {
   const point = unique(source, '    const result = await conversationRegistry.remove(chatId)', '原删局登记点')
   return source.slice(0, point) + DB_SAVE_DELETE_CALL + source.slice(point)
 }
-export function applyDbSaveHostTransform(source) {
+export function applyDbSaveHostTransform(source, options = {}) {
   if (source.includes(DB_SAVE_MARKER)) {
     // 旧 v1 标记源允许升级：先补删局消费，再按是否含 deleteChat 做必需消费者校验（缺项即 fail-closed）。
     const oldCardValidation = "validateCard: payload => cardPreparation.project(cardPreparation.create({ kind: 'import', payload }))"
     const currentCardValidation = DB_SAVE_REQUIRED.find(item => item.startsWith('validateCard:'))
-    const upgraded = applyDbSaveDeleteTransform(source.includes(oldCardValidation) ? source.replace(oldCardValidation, currentCardValidation) : source)
+    let upgraded = applyDbSaveDeleteTransform(source.includes(oldCardValidation) ? source.replace(oldCardValidation, currentCardValidation) : source)
+    if (!upgraded.includes('pluginData: { snapshot:')) upgraded = upgraded.replace("    fileResources, profileData, gameFootprint, attachments: ctx.get('attachments'),", "    fileResources, profileData, gameFootprint, attachments: ctx.get('attachments'),\n    pluginData: { snapshot: id => pluginData.snapshot?.(id) ?? null, importInto: input => pluginData.importInto(input), removeChat: id => pluginData.removeChat(id) },\n    pluginMedia: { snapshot: id => pluginMedia.snapshot?.(id) ?? null, importInto: input => pluginMedia.importInto(input), removeChat: id => pluginMedia.removeChat(id) },")
     const required = [...DB_SAVE_REQUIRED, ...(upgraded.includes(DB_SAVE_DELETE_ANCHOR) ? [DB_SAVE_DELETE_REQUIRED] : [])]
     for (const item of required) if (!upgraded.includes(item)) throw Error('DB交换接缝标记存在但消费者缺失：' + item)
-    return upgraded
+    return applySceneSlotDependency(upgraded, options.sceneSlots === true)
   }
   const exportStart = '  async function exportGameSave(sessionId, options = {}) {'
   const exportEnd = '  // Imports always create a new game:'
@@ -40,6 +56,8 @@ export function applyDbSaveHostTransform(source) {
   const initialization = `  const dbSaveRegistration = createDbSaveRegistration({ store: profileData })
   const dbSaveResources = createDbSaveResourceTransfer({
     fileResources, profileData, gameFootprint, attachments: ctx.get('attachments'),
+    pluginData: { snapshot: id => pluginData.snapshot?.(id) ?? null, importInto: input => pluginData.importInto(input), removeChat: id => pluginData.removeChat(id) },
+    pluginMedia: { snapshot: id => pluginMedia.snapshot?.(id) ?? null, importInto: input => pluginMedia.importInto(input), removeChat: id => pluginMedia.removeChat(id) },
     readChatCard, importCard, computeSceneTarget,
     validateCard: async payload => { const card = await cardPreparation.create({ kind: 'import', payload }); return { raw: cardPreparation.present({ card, as: 'raw' }), definition: cardPreparation.project(card) } }
   })
@@ -71,7 +89,8 @@ export function applyDbSaveHostTransform(source) {
 `
   const point = unique(next, '  const importingGameSaves = new Set()', '引擎依赖装配')
   next = next.slice(0, point) + initialization + next.slice(point)
-  return "import { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } from './domain/storage-db-save.js'\n" + DB_SAVE_MARKER + '\n' + applyDbSaveDeleteTransform(next)
+  let result = "import { createDbSaveExchange, createDbSaveRegistration, createDbSaveResourceTransfer } from './domain/storage-db-save.js'\n" + DB_SAVE_MARKER + '\n' + applyDbSaveDeleteTransform(next)
+  return applySceneSlotDependency(result, options.sceneSlots === true)
 }
 // 0.3.4：延后删除足迹接缝——复用作者既有 pending 队列，仅扩**只读 SQL 路径核验**；不改队列格式、不换 root、不新增存储。
 export const DB_SAVE_FOOTPRINT_MARKER = '// [dsh-tavern-db-save-footprint:v1]'

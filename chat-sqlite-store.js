@@ -353,7 +353,10 @@ export function createChatSqliteStore(options = {}) {
     try {
       // 当前书保持作者接口；逐轮历史仅在同一事务存一次完整版本，账本留精确引用。
       const compacted = rollbackWorldbooks.compact(db, chat)
-      if (compacted !== chat && changes !== null) changes = [...changes, { op: 'set', path: ['timeline'], value: compacted.timeline }]
+      if (compacted !== chat && changes !== null) {
+        changes = [...changes, { op: 'set', path: ['timeline'], value: compacted.timeline }]
+        if(compacted.regenRecovery!==chat.regenRecovery)changes.push({op:'set',path:['regenRecovery'],value:compacted.regenRecovery})
+      }
       chat = compacted
       // ---- 头部键序/增删：只动 ord 与增删，绝不为了改序而重新序列化未变化的键 ----
       const stored = db.prepare('SELECT key, ord FROM archive_head_fields ORDER BY ord').all()
@@ -998,6 +1001,15 @@ export function createChatSqliteStore(options = {}) {
     const db = handle(id)
     if (!db) throw new Error('世界书历史引用缺少本档数据库')
     return readSqlSnapshot(db, () => rollbackWorldbooks.read(db, chat, ref))
+  }
+
+  function readRollbackOperationSnapshot(chat, ref) {
+    assertActive()
+    const id=safeChatId(chat?.id)
+    if(hasLegacyArtifact(id))throw new Error('原件不使用操作历史引用')
+    const db=handle(id)
+    if(!db)throw new Error('操作历史前像缺少本档数据库')
+    return readSqlSnapshot(db,()=>rollbackWorldbooks.readOperation(db,chat,ref))
   }
 
   // ---------- 读取面 ----------
@@ -1838,5 +1850,5 @@ export function createChatSqliteStore(options = {}) {
     variables.dispose()
   }
 
-  return Object.freeze({ dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
+  return Object.freeze({ dbSaveArchivePath, dbSaveNewArchivePath, rollbackArchivePath: dbFile, detachedUpdate: true, readCurrentRollbackWorldbookRef, readRollbackWorldbook, readRollbackOperationSnapshot, readCurrentVariableSnapshot, read, readWindow, readOpeningWindow, readActivitySummary, readStoryInput, readCandidateInput, readSettlementInput, readTemplateWindowReader, setStatusBarPlacement, appendMessages, setMessageFloor, readHelperContext, readSessionState, readSceneImageState, readSettlementCheckpoint, readBackgroundConfig, readDisplayRuntimeState, readSlice, readSettlementBase, readChangedSlice, readChangedIndices, readViewDelta, patch, readRevision, update, version, remove, variables: variablesApi, dispose })
 }
