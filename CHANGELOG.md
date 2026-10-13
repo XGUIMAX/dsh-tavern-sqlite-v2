@@ -1,5 +1,20 @@
 # 更新日志
 
+## 0.4.10 上游 537e878 对账/锚点适配与安装单源、兼容/安全收口
+
+- **适配酒馆版本**：DSH Tavern **2.6.0 / main `537e878`**（完整提交 `537e878f882dbac8b651fba0f72ecb492a8a2b21`，运行时 revision `8296b5b1` / sequence599，SDK0.1.5-rc.2）；同时保持对 0.4.9 基线（`91963734`）的安装兼容。其他未适配版本可能运行报错，安装接入成功不代表运行期功能兼容。
+- **正文编辑第四安装形态**：兼容最新作者 `reconcileStory` 对账调用并原样保留；四种作者形态恰一命中才施缝，未知/多形态 fail-closed。
+- **补记写入护栏（干净回退边界）**：对账补记（`adopt:true`）在正文提交护栏内建立同等约束（同 session/无回退进行中/该轮无在途 operation/内容齐全）；**回退必换 branch 且存档无回退痕迹，过期对账 report 的补记一律拒绝——已删轮不可复活**；补记强制走完整快照路径使业务回退基准记真实楼数（快路径 header-only 会记 0 楼、回退将删空正文）；附件-only 轮（空文本+附件）正常放行。
+- **重生成锚点血缘根**：临时轮末楼为投影 replace 时，补写锚点 reply 落在 append 血缘根（上游 resolver 按 sourceEventSeqs 求根且 replace 根集不含自身）；物理采用后新正文用同一份采用计划的真实坐标覆盖临时锚点，证不明则删。
+- **安装入口单源**：包内二入口（`install.sh`、`deploy/install.sh`）与外部发行件由 `scripts/render-install-sh.mjs` 从 `deploy/install.template.sh`＋`deploy/bootstrap.mjs`＋当前 `package.json` 版本渲染；包内 URL/SHA 保持占位（内嵌本次 tgz 摘要会自引用），外部件在摘要产出后由同一函数填一次地址与摘要。构建门禁核版本/URL/SHA 语义与内嵌体逐字节一致，安装器版本与内容不再各写一份（修掉“源码树副本滞后若干代”的根因）。
+- **源码树入口改为本地 wrapper**：源码树 `install.sh` 与 `deploy/install.sh` 只读当前 `package.json` 与 `deploy/bootstrap.mjs`，不固定版本/URL/SHA、不内嵌获取器副本；按脚本位置定位本包并自动补 `--package`，离线可装卸。公开发布入口仍是构建输出 `dist/install.sh`（固定版本 URL/SHA）。
+- **Linux 停服失败补偿**：停服未确证且原 PID 仍活时不再代启第二份进程，保持原运行状态；不新增 Linux 准入/参数/HTTP 检查。
+- **公开 API 兼容与退役策略**：新增 [PUBLIC-API-COMPATIBILITY.md](PUBLIC-API-COMPATIBILITY.md)，登记 56 个导出（prod 44 / deploy-only 7 / test-only 1 / zero 2 / infra 2）；保留导出、deprecated 仅做注记、移除需大版本与外部证据、不复活生产死路径；外部集成只经公开服务面，不直接写库。
+- **安全边界**：服务端 MVU / 卡脚本在 `node:vm` 上下文内执行，只提供超时、钩子预算与调用窗口校验等跑飞防护，**不是**对不可信代码的安全隔离（realm 逃逸按已知路径收口、不宣称完全阻断；对脚本可见的宿主能力改为显式 bridge，但仍与宿主同进程、同用户权限）。
+- **卸载口径准确化**：按现场完整注释区块撤除本包注入；**半截区块、归属不明、双源装配明确拒绝**；**不承诺"坏旧包/半装残留"自动兜底**（旧 residual 分支当前无生产调用者，本任务不为其接线）。
+- **收口要点**：F001——API 侧解析路径不使用宿主 `new Function`；IPC `seq` 校验、独立 `resp` echo、`timeout` 作废唤醒（默认单槽 8MiB）；activity 改 atomic 计数；变量热 cache 与 state 截断；legacy缺表返回空、2秒busy timeout与有界快照缓存、单帧有界（输入 8MiB / 输出 64MiB）、支持跨 project 选择；store 公开 `peek` / `closeCached`。
+- 537e878 适配定向验证 23 叶全绿＋施工链 89 步探针 0 throw；发布流程含唯一一次全量与 188 Live E2E 一轮（数字见发行回执）。R1 / R13 经复核为**误报并撤回**（分页实现无需改动）；duplicate comparator 语义不同，**不合并**。
+
 ## 0.4.9 最新main输入判定与回退恢复适配
 
 - **适配酒馆版本**：DSH Tavern **2.6.0 / main `91963734`**（完整提交 `91963734db8911c9b9a7095b2947f4c9ffeec69c`，作者分发清单revision `74c6f65ecab6714072ae341773d3b373866e41bd` / sequence597，SDK0.1.5-rc.2）。其他未适配版本可能运行报错，安装接入成功不代表运行期功能兼容。

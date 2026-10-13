@@ -1,263 +1,51 @@
 #!/bin/sh
-# 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
+# 源码树/本地安装入口（单源）：只读当前 package.json 与 deploy/bootstrap.mjs，不固定版本/URL/SHA、不内嵌获取器副本。
+# 包内正式入口（install.sh 与 deploy/install.sh）由 scripts/render-install-sh.mjs 从模板＋获取器源＋当前版本渲染。
 set -eu
-RELEASE_URL='__DSH_RELEASE_URL__'
-RELEASE_SHA256='__DSH_RELEASE_SHA256__'
-VERSION='0.4.7'
-SCRIPT_DIR=''
+PACKAGE_NAME='dsh-tavern-sqlite-v2'
+BOOTSTRAP_REL='deploy/bootstrap.mjs'
+SELF_DIR=''
 case "$0" in
-  *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
+  */*) SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;
 esac
-export DSH_STORAGE_BOOTSTRAP_DIR="$SCRIPT_DIR"
-export DSH_STORAGE_RELEASE_URL="${DSH_STORAGE_RELEASE_URL:-$RELEASE_URL}"
-export DSH_STORAGE_RELEASE_SHA256="${DSH_STORAGE_RELEASE_SHA256:-$RELEASE_SHA256}"
-export DSH_STORAGE_RELEASE_VERSION="$VERSION"
 command -v node >/dev/null 2>&1 || { echo '需要已有酒馆使用的Node.js 22.19+；本脚本不另装运行时。' >&2; exit 1; }
-node --input-type=module - "$@" <<'DSH_STORAGE_BOOTSTRAP'
-// SH内嵌的零依赖获取器；仅缺安装包时联网，获取后进入对应平台维护入口。
-import fs from 'node:fs'
-import path from 'node:path'
-import os from 'node:os'
-import { createHash, randomUUID } from 'node:crypto'
-import { gunzipSync } from 'node:zlib'
-import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-const NAME = 'dsh-tavern-sqlite-v2'
-const MAX = 16 * 1024 * 1024
-// 供应链口径与维护入口 driver.mjs 同表：零运行时依赖 + vendor 台账 + 五个入口文件。
-const VENDOR_ENTRIES = { lodash: 'lib/vendor/lodash/lodash.min.js', json5: 'lib/vendor/json5/index.mjs', jsonrepair: 'lib/vendor/jsonrepair/esm/index.js', yaml: 'lib/vendor/yaml/dist/index.js', acorn: 'lib/vendor/acorn/acorn.mjs' }
-// 别的版本线一律不碰：既不自动迁移/共装，也不替它们卸载。
-const OTHER_LINES = ['dsh-tavern-storage-sqlite', 'dsh-tavern-storage-sqlite-v1', 'dsh-tavern-storage-sqlite-v2', 'dsh-tavern-sqlite-v1']
-export function bootstrapOptions(args) {
-  let action = 'install', local
-  const pass = []
-  if (args[0] && !args[0].startsWith('--')) action = args.shift()
-  if (!['install', 'uninstall'].includes(action)) throw Error('动作须为install或uninstall')
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--package') { local = args[++i]; if (!local || local.startsWith('--')) throw Error('--package缺值') }
-    else if (['--home', '--app', '--desktop-app', '--profile', '--port', '--systemd-unit', '--evidence'].includes(args[i])) { const value = args[i + 1]; if (!value || value.startsWith('--')) throw Error('参数缺值'); pass.push(args[i], value); i++ }
-    else if (['--check', '--apply', '--background', '--prepare-env'].includes(args[i])) pass.push(args[i])
-    else throw Error('未知参数：' + args[i])
-  }
-  return { action, local, pass }
+# 交给 node 的路径要按它的平台形态给出（Git Bash/MSYS 下用 cygpath，原生 POSIX 原样透传）。
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    converted=$(cygpath -w -- "$1" 2>/dev/null) || converted=$1
+  else
+    converted=$1
+  fi
+  printf '%s' "$converted"
 }
-function option(pass, key) { const index = pass.indexOf(key); return index < 0 ? undefined : pass[index + 1] }
-/** 现装目录能否当执行器：只有完整可用包（包身份/零依赖/vendor/兜底资产齐全）才回路径。
- *  损坏、半装、悬空链接一律返回 undefined，由引导层回落完整新发行包；不猜、不修、不联网替换。 */
-function usablePackage(dir) {
-  try {
-    if (!dir || !fs.existsSync(dir)) return undefined
-    const real = fs.realpathSync(dir)
-    if (!fs.statSync(real).isDirectory()) return undefined
-    validatePackage(real)
-    return real
-  } catch { return undefined }
+# 用户显式 --package 时不覆盖；未给时由本次定位到的包目录补上，保证与当前 manifest/获取器同源。
+explicit_package=''
+wanted_package=0
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '--package' ]; then explicit_package=$argument; wanted_package=1; fi
+  if [ "$argument" = '--package' ]; then wanted_package=1; fi
+  previous=$argument
+done
+manifest_name() {
+  node --input-type=module -e 'import fs from "node:fs";let value;try{value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.exit(1)}if(typeof value.name!=="string"){process.exit(1)}process.stdout.write(value.name)' "$(native_path "$1")/package.json" 2>/dev/null
 }
-/**
- * 定位目标profile的V2现装。
- * install：严守依赖/bundle/链接三者一致，不猜缺包也不猜已卸载。
- * uninstall：容忍本插件半装/无包/悬空链接——缺包不等于没装过，接缝可能仍在，必须继续交给维护入口；
- *   只回“可用的完整本地包”作执行器建议（不碰别的版本线，不读用户业务数据）。
- */
-export function installedPackage(pass, env = process.env, { action = 'install' } = {}) {
-  const profile = option(pass, '--profile') || 'tavern'
-  if (profile !== 'tavern') throw Error('当前V2只适配tavern profile')
-  const explicit = option(pass, '--home'), candidates = explicit ? [path.resolve(explicit)] : [...new Set([env.DSH_TAVERN_CLI_HOME, env.DSH_HOME, process.cwd(), path.join(os.homedir(), '.dsh-tavern')].filter(Boolean).map(p => path.resolve(p)))].filter(p => fs.existsSync(path.join(p, 'profiles', profile, 'package.json')))
-  if (candidates.length !== 1) throw Error(candidates.length ? '多个酒馆目录，请指定--home' : '没有找到已有酒馆，请指定--home；不会另装酒馆')
-  const profileDir=path.join(candidates[0],'profiles',profile),manifestFile=path.join(profileDir,'package.json')
-  if(!fs.existsSync(manifestFile))throw Error('目标不是已有酒馆profile，下载前拒绝')
-  const manifest=JSON.parse(fs.readFileSync(manifestFile,'utf8')),dir=path.join(profileDir,'node_modules',NAME)
-  for (const name of OTHER_LINES) if (manifest.dependencies?.[name] || manifest.dsh?.profile?.bundles?.includes(name)) throw Error('已装旧包名或另一版本线：' + name + '；先用其所属旧安装器卸载，不自动迁移/共装')
-  const present=!!manifest.dependencies?.[NAME],listed=(manifest.dsh?.profile?.bundles||[]).includes(NAME)
-  const standardDir=path.join(candidates[0],'profile-data','tavern','data','plugins',NAME)
-  if (fs.existsSync(standardDir)) {
-    if(present||listed||fs.existsSync(dir))throw Error('标准插件目录与同名profile装配共存，拒绝双源')
-    const pkg=JSON.parse(fs.readFileSync(path.join(standardDir,'package.json'),'utf8'))
-    if(pkg.name!==NAME)throw Error('标准目录属于其他包，拒绝认领')
-    return usablePackage(standardDir)
-  }
-  if (action !== 'uninstall') {
-    if(present!==listed||present!==fs.existsSync(dir))throw Error('已装依赖/bundle/链接不一致，拒绝猜测缺包下载或已卸载')
-    return present ? fs.realpathSync(dir) : undefined
-  }
-  return usablePackage(dir)
+is_package() {
+  if [ -z "$1" ]; then return 1; fi
+  if [ ! -f "$1/package.json" ]; then return 1; fi
+  if [ ! -f "$1/$BOOTSTRAP_REL" ]; then return 1; fi
+  if [ "$(manifest_name "$1")" != "$PACKAGE_NAME" ]; then return 1; fi
+  return 0
 }
-/** 核心维护链的资产存在检查：只按结构引用核（相对导入 + new URL('./x', import.meta.url)），
- *  不预设兜底资产文件名——主线新增/改名/增件都自动纳入，缺件即判包不完整。 */
-function maintenanceAssets(root) {
-  const dir = path.join(root, 'deploy', 'maintenance')
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return ['deploy/maintenance']
-  const files = [path.join(root, 'deploy', 'maintenance.mjs')]
-  for (const name of fs.readdirSync(dir)) if (name.endsWith('.mjs') && fs.statSync(path.join(dir, name)).isFile()) files.push(path.join(dir, name))
-  const strip = text => text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1')
-  const missing = new Set()
-  for (const file of files) {
-    if (!fs.existsSync(file)) continue
-    const text = strip(fs.readFileSync(file, 'utf8')), from = path.dirname(file)
-    for (const pattern of [/\bfrom\s*['"](\.[^'"]*)['"]/g, /\bimport\s*\(\s*['"](\.[^'"]*)['"]\s*\)/g, /\bimport\s+['"](\.[^'"]*)['"]/g, /new URL\(\s*['"](\.[^'"]*)['"]\s*,\s*import\.meta\.url\s*\)/g]) {
-      for (const hit of text.matchAll(pattern)) {
-        const target = path.resolve(from, hit[1]), rel = path.relative(root, target)
-        if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !fs.existsSync(target)) missing.add(path.relative(root, target) || hit[1])
-      }
-    }
-  }
-  return [...missing].sort()
-}
-export function validatePackage(root) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
-  if (process.platform === 'linux') {
-    // 获取器只确认选中本插件及执行入口，不检查酒馆环境/模块链接/文件一致性。
-    if (manifest.name !== NAME || !fs.existsSync(path.join(root, 'deploy', 'maintenance.mjs'))) throw Error('未找到本插件安装入口')
-    return manifest
-  }
-  const declared = Object.keys(manifest.dependencies || {})
-  // 零运行时依赖：lodash/yaml/json5/jsonrepair 已 vendor 进包内，任何声明依赖都拒绝（供应链政策不放宽）。
-  if (manifest.name !== NAME || declared.length > 0 || !Array.isArray(manifest.files)) throw Error('不是完整V2包或声明了未知运行依赖：' + [manifest.name !== NAME ? '包名 ' + manifest.name : '', declared.length ? '依赖 ' + declared.join('、') : '', Array.isArray(manifest.files) ? '' : '缺files声明'].filter(Boolean).join('；') + '；本包要求零运行时依赖（解析器已 vendor 进包内）')
-  // vendor 台账 + 五个入口：与维护入口 driver.mjs 同一道护栏，缺件不联网替换损坏包。
-  const ledger = path.join(root, 'lib', 'vendor', 'manifest.json')
-  if (!fs.existsSync(ledger)) throw Error('缺少 vendor 账本 lib/vendor/manifest.json；不联网替换损坏包')
-  let record
-  try { record = JSON.parse(fs.readFileSync(ledger, 'utf8')) } catch (error) { throw Error('vendor 账本无法解析：' + (error && error.message)) }
-  for (const [name, entry] of Object.entries(VENDOR_ENTRIES)) {
-    const recorded = record.packages?.[name]
-    if (!recorded || recorded.version === undefined) throw Error('vendor 账本缺少 ' + name + ' 的记录；不联网替换损坏包')
-    if (!fs.existsSync(path.join(root, entry))) throw Error('vendor 入口缺失：' + entry + '；不联网替换损坏包')
-  }
-  for (const rel of ['deploy/maintenance.mjs', 'deploy/maintenance/runner.mjs', 'deploy/maintenance/source.mjs', 'index.js', 'cordis.patch.yml', ...manifest.files.map(p => p.replace(/\/\*.*$/, ''))]) {
-    if (rel.includes('..') || path.isAbsolute(rel) || !fs.existsSync(path.join(root, rel))) throw Error('本地插件包不完整：' + rel + '；不联网替换损坏包')
-  }
-  const assets = maintenanceAssets(root)
-  if (assets.length) throw Error('本地插件包不完整（维护链引用缺失）：' + assets.join('、') + '；不联网替换损坏包')
-  return manifest
-}
-// 本地候选的版本识别：目录读 package.json（须本包名），tgz 从文件名取版本。
-function directoryVersion(dir) {
-  try {
-    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
-    return manifest && manifest.name === NAME && typeof manifest.version === 'string' ? manifest.version : null
-  } catch { return null }
-}
-export function archiveVersion(file) {
-  const match = new RegExp('^' + NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-(\\d[^/]*)\\.tgz$').exec(path.basename(file))
-  return match ? match[1] : null
-}
-export function selectLocal({ action, local, installed, scriptDir = '', cwd = process.cwd(), cache, version }) {
-  // 网络优先（2026-10-05 用户定）：本地候选（已装目录/相邻包/缓存tgz）只有与本次发行版本
-  // 完全一致才采用；版本不符一律回落下载网络发行包，不用旧代本地件当执行器。
-  // --package 是显式人工指定，不受版本一致性约束。
-  // 卸载不再因“没有现装包”早退（action 只用于区分语义，两动作同一套候选）：缺包不等于接缝已撤，
-  // 仍选本地指定/新发行包；都选不到才下载，下载校验完成后才进维护。
-  const sameVersion = candidate => {
-    if (!version) return false
-    return candidate.kind === 'archive' ? archiveVersion(candidate.file) === version : directoryVersion(candidate.file) === version
-  }
-  if (local) {
-    const file = path.resolve(cwd, local)
-    if (!fs.existsSync(file)) throw Error('指定本地包不存在：' + file)
-    return { kind: fs.statSync(file).isDirectory() ? 'directory' : 'archive', file }
-  }
-  if (installed) {
-    const candidate = { kind: 'directory', file: installed }
-    if (sameVersion(candidate)) return candidate
-  }
-  const adjacent = scriptDir ? path.resolve(scriptDir, '..') : ''
-  for (const file of [adjacent, path.join(cwd, NAME), path.join(cwd, 'package'), cwd].filter(Boolean)) {
-    const candidate = { kind: 'directory', file }
-    if (directoryVersion(file) && sameVersion(candidate)) return candidate
-  }
-  for (const dir of [...new Set([scriptDir, cwd, cache].filter(Boolean))]) {
-    const file = path.join(dir, NAME + '-' + version + '.tgz')
-    if (fs.existsSync(file)) return { kind: 'archive', file }
-  }
-  // 无同版本本地件：回落 null ⇒ 引导层下载网络发行包执行（下载校验完成后才进维护）。
-  return null
-}
-export async function downloadArchive(url, expected, file, { request = fetch } = {}) {
-  if (!/^https:\/\//.test(url || '') || !/^[0-9a-f]{64}$/.test(expected || '')) throw Error('尚未生成固定GitHub发行地址/摘要；请用--package本地包。不会请求latest/main或猜仓库')
-  const response = await request(url, { signal: AbortSignal.timeout(180000), redirect: 'follow' })
-  if (!response.ok || !response.body) throw Error('发行包下载失败：HTTP ' + response.status)
-  const blocks = []; let size = 0
-  for await (const block of response.body) { size += block.length; if (size > MAX) throw Error('发行包超过16MiB边界'); blocks.push(block) }
-  const bytes = Buffer.concat(blocks)
-  if (createHash('sha256').update(bytes).digest('hex') !== expected) throw Error('发行包SHA256不匹配，拒绝执行')
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 })
-}
-export function unpackArchive(file, root, expected) {
-  const bytes = fs.readFileSync(file)
-  if (bytes.length > MAX) throw Error('本地包超过16MiB边界')
-  if (expected && createHash('sha256').update(bytes).digest('hex') !== expected) throw Error('缓存发行包摘要不符；不联网覆盖损坏包')
-  const tar = gunzipSync(bytes, { maxOutputLength: MAX }), files = new Set()
-  // 仅接受npm pack标准package/路径、目录和普通文件，不跟随链接或接受特殊扩展路径。
-  for (let at = 0; at + 512 <= tar.length;) {
-    const header = tar.subarray(at, at + 512)
-    if (header.every(value => value === 0)) break
-    const text = (begin, length) => header.subarray(begin, begin + length).toString('utf8').split('\0')[0]
-    const number = text(124, 12).trim(), checksumText = text(148, 8).trim()
-    if (!/^[0-7]+$/.test(number) || !/^[0-7]+$/.test(checksumText)) throw Error('tgz头字段不合法')
-    const size = parseInt(number, 8), type = text(156, 1), prefix = text(345, 155), name = (prefix ? prefix + '/' : '') + text(0, 100)
-    let checksum = 0; for (let i = 0; i < 512; i++) checksum += i >= 148 && i < 156 ? 32 : header[i]
-    if (checksum !== parseInt(checksumText, 8) || at + 512 + size > tar.length) throw Error('tgz头校验/长度错误')
-    if (!name.startsWith('package/') || name.includes('\\') || name.split('/').some(s => s === '..' || s === '.') || !['', '0', '5'].includes(type)) throw Error('tgz不接受越界/链接/特殊成员：' + name)
-    const rel = name.slice(8).replace(/\/$/, ''), target = path.resolve(root, rel)
-    if (rel && !target.startsWith(path.resolve(root) + path.sep)) throw Error('tgz解包越界')
-    if (rel) {
-      if (files.has(rel)) throw Error('tgz重复成员：' + rel)
-      files.add(rel)
-      if (type === '5') fs.mkdirSync(target, { recursive: true, mode: 0o700 })
-      else { fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 }); fs.writeFileSync(target, tar.subarray(at + 512, at + 512 + size), { flag: 'wx', mode: 0o600 }) }
-    }
-    at += 512 + Math.ceil(size / 512) * 512
-  }
-  validatePackage(root)
-}
-export async function bootstrap(args = process.argv.slice(2), { env = process.env, request = fetch, invoke } = {}) {
-  const op = bootstrapOptions([...args]), installed = installedPackage(op.pass, env, { action: op.action }), version = env.DSH_STORAGE_RELEASE_VERSION || '0.1.2'
-  const cache = path.resolve(env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), NAME)
-  // 卸载缺现装包不再当“没装过”早退：接缝可能仍在，继续选本地指定/新发行包（选不到才下载）。
-  if (op.action === 'uninstall' && !installed) console.log('目标profile未记录V2现装；缺包不等于接缝已撤，继续用本地完整包或发行包执行卸载。')
-  let selected = selectLocal({ ...op, installed, scriptDir: env.DSH_STORAGE_BOOTSTRAP_DIR, cache, version })
-  if (!selected) {
-    const archive = path.join(cache, NAME + '-' + version + '.tgz')
-    console.log('本地无插件包，下载固定发行包；下载期间不停止实例。')
-    const partial = archive + '.download-' + randomUUID()
-    await downloadArchive(env.DSH_STORAGE_RELEASE_URL, env.DSH_STORAGE_RELEASE_SHA256, partial, { request })
-    // 目标缓存若被另一下载创建，只采用校验一致内容，不覆盖。
-    if (fs.existsSync(archive)) {
-      if (createHash('sha256').update(fs.readFileSync(archive)).digest('hex') !== env.DSH_STORAGE_RELEASE_SHA256) throw Error('并发缓存内容不同，拒绝覆盖')
-      fs.unlinkSync(partial)
-    } else fs.renameSync(partial, archive)
-    selected = { kind: 'archive', file: archive }
-    console.log('下载及校验完成。')
-  }
-  const started = performance.now()
-  let root = selected.file, temporary
-  try {
-  if (selected.kind === 'archive') {
-    root = temporary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-storage-package-')))
-    // 只在执行器退出/完成独立副本后清理本次自己的随机目录；中断父进程则留给仍运行的子作业。
-    const expected = selected.file.startsWith(cache + path.sep) && /^[0-9a-f]{64}$/.test(env.DSH_STORAGE_RELEASE_SHA256 || '') ? env.DSH_STORAGE_RELEASE_SHA256 : undefined
-    unpackArchive(selected.file, root, expected)
-  } else validatePackage(root)
-  if (!fs.existsSync(path.join(root, 'deploy', 'maintenance', 'driver.mjs'))) throw Error('本地旧代执行器仍需认证；不会调用或下载。请用--package指定新版本地离线包作执行器，旧包保留用于恢复')
-  const entry = path.join(root, 'deploy', 'maintenance.mjs'), argv = [entry, op.action, ...op.pass, '--elapsed', String(performance.now() - started)]
-  console.log(process.platform === 'linux' ? '使用本地插件包；定位接缝后直接维护，完成后保持原运行状态。' : '使用本地完整包；开始离线维护，成功预算180秒。')
-  if (invoke) return await invoke(process.execPath, argv)
-  const child = spawn(process.execPath, argv, { stdio: 'inherit', detached: process.platform !== 'win32', windowsHide: true })
-  const detach = () => { child.unref(); console.error('终端中断，已启动维护作业继续。'); process.exit(130) }
-  process.once('SIGINT', detach); process.once('SIGTERM', detach)
-  const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })
-  process.removeListener('SIGINT', detach); process.removeListener('SIGTERM', detach)
-  return code ?? 1
-  } finally {
-    if(temporary){
-      if(!temporary.startsWith(fs.realpathSync(os.tmpdir())+path.sep+'dsh-storage-package-')||fs.realpathSync(temporary)!==temporary)throw Error('本次解包目录身份变化，不清理')
-      fs.rmSync(temporary,{recursive:true,force:true})
-    }
-  }
-}
-if (process.argv[1] === '-' || (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))) {
-  bootstrap().then(code => { process.exitCode = code }).catch(error => { console.error('安装入口失败：' + error.message); process.exitCode = 1 })
-}
-
-DSH_STORAGE_BOOTSTRAP
+PACKAGE_ROOT=''
+for candidate in "$SELF_DIR" "$SELF_DIR/.." "$explicit_package"; do
+  if is_package "$candidate"; then PACKAGE_ROOT=$(CDPATH= cd -- "$candidate" && pwd); break; fi
+done
+if [ -z "$PACKAGE_ROOT" ]; then
+  echo '未定位本插件包（需 package.json 与 '"$BOOTSTRAP_REL"'）：请在包目录内直接运行本脚本，或加 --package <包目录>。' >&2
+  exit 1
+fi
+if [ "$wanted_package" = 1 ]; then
+  exec node "$(native_path "$PACKAGE_ROOT/$BOOTSTRAP_REL")" "$@"
+fi
+exec node "$(native_path "$PACKAGE_ROOT/$BOOTSTRAP_REL")" "$@" --package "$(native_path "$PACKAGE_ROOT")"

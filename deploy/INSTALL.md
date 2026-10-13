@@ -19,13 +19,14 @@ Linux 安装只需定位目标、命中必需接缝、停止原运行实例后�
 
 ## 支持范围
 
-- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 0.4.9 的适配目标为上游 main `91963734db8911c9b9a7095b2947f4c9ffeec69c`（简称 `91963734`，Tavern2.6.0；作者分发清单revision `74c6f65ecab6714072ae341773d3b373866e41bd` / sequence597，DSH SDK0.1.5-rc.2）。
+- **适配酒馆版本以对应 [Release 下载页面](https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases)更新说明为准。** 当前版本 **0.4.10：适配上游 main `537e878f882dbac8b651fba0f72ecb492a8a2b21`（简称 `537e878`，Tavern2.6.0；运行时 revision `8296b5b1` / sequence599，DSH SDK0.1.5-rc.2；兼容 0.4.9 基线 `91963734` 安装）**。
 - **其他未适配版本使用过程中可能出现运行错误。** 安装接入检查通过不代表运行期功能兼容；请更新到对应 Release 标注的适配酒馆版本，或自行适配本插件后使用。版本标注是兼容说明，不新增作者SHA、签名或纯净源码准入。
 
 - 支持 macOS、Linux、WSL2 CLI 与 Windows（桌面版 Electron、原生 Windows CLI）。运行能力和适配范围以 Release 说明为准；Linux 装卸不检查 DSH / boot 版本、Node VM 旗标或 SQLite / zstd 能力。
 - **Linux 接入**：全部必需接缝在当前源码唯一命中后直接注入；清单缺失/过时、用户改块外代码（不破坏接缝）均不影响安装。Windows / macOS 仍保留隔离预演及既有环境检查。
 - **发布状态**：现场注释区块装卸自 **0.3.8** 起已公开发布，机制说明见 [COMMENT-SEAMS.md](<COMMENT-SEAMS.md>)；旧机制（≤0.3.7）现场需先用旧版插件自带 CLI 完整卸载，再安装本版。
 - **0.4.9 延续 Linux / WSL2 直接维护流程、2.6场景slot与造型参考存档适配，并兼容最新main输入判定/漏写回合/回退恢复变更**；旧版附件不包含本次最新main适配，使用新能力须下载0.4.9或后续版本。同名插件换版本由统一维护命令清旧装配再安装，不作包字节比较。
+- **0.4.10（本地发包，未公开发布）**：安装入口单源——包内二入口与外部发行件由同一渲染器从模板＋获取器源＋当前 `package.json` 版本生成，包内 URL/SHA 保持占位以避免内嵌本次 tgz 摘要自引用；源码树 `install.sh` / `deploy/install.sh` 改为只读当前 manifest/bootstrap 的本地 wrapper；Linux 停服未确证且原进程仍活时不再代启第二份进程；公开 API 兼容与退役策略见 [PUBLIC-API-COMPATIBILITY.md](<../PUBLIC-API-COMPATIBILITY.md>)。本候选已完成按域的具名定向验证（IPC 原语与 runtime、变量、legacy/fork、ESM/Worker、安全、旧保留 API），**未跑全量、未做实机 Electron/页面验收、未发布或部署**。卸载口径限定为按现场完整注释区块撤除；半截区块、归属不明、双源装配明确拒绝，**不为本任务接线旧 residual 兜底分支**。
 - 运行依赖零 npm 外部依赖：`json5`、`jsonrepair`、`lodash`、`yaml` 与注释块词法器 `acorn`（8.15.0，MIT）均已 vendor 进包内，安装不联网补依赖。
 - 当前源码在各平台统一复制程序到酒馆标准数据插件目录，包内 peer 仍链接宿主同一物理实例；不再把本包加为 profile 依赖或 bundle，不调用包管理器装卸本包，不重装其它依赖、不联网补 SDK。
 - Linux 不检查或补 `--experimental-vm-modules`，不改 systemd 单元、原 argv/cwd/env 或 KillMode；`--prepare-env` 只作为旧参数兼容且不修改环境。macOS 保留既有维护路径；Windows CLI 拒绝 `--prepare-env` / systemd 接管。
@@ -64,7 +65,7 @@ curl -fsSL https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/latest/d
 
 **目录默认自动识别**：检查 `DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前工作目录与 `~/.dsh-tavern` 下的已有 tavern profile。找到唯一目标就直接继续；未找到或有多个实例时才提示 `--home`，不把手填路径作为正常步骤，也不扫描全盘猜目录。
 
-仓库根 `install.sh` 会完整获取 latest 正式 Release 的 SH 再执行；失败或空文件不执行。正式 SH 固定同代 tgz 地址、版本与 SHA256。
+公开发布使用的入口是**构建输出** `dist/install.sh`：它固定本代 tgz 地址、版本与 SHA256，作为 Release 资产发布，并与公开仓根 `install.sh` 同源（同步时以构建件替代）。源码树 `install.sh` 与 `deploy/install.sh` 是**本地 wrapper**：只读当前 `package.json` 与 `deploy/bootstrap.mjs`，不固定版本/地址，可离线装卸。发行包内 `install.sh` 与 `deploy/install.sh` 由同一渲染器生成：带具体版本，URL/SHA 保持占位——包内一旦内嵌本次 tgz 摘要即自引用，因此不写入包内。
 
 ## 注释区块装卸与旧版切换
 
@@ -128,6 +129,8 @@ sh deploy/install.sh install
 sh deploy/install.sh uninstall
 ```
 
+包内这两个入口带本包具体版本、URL/SHA 为占位（避免内嵌本次 tgz 摘要）：**本地有完整包即离线可用**，不会去下载同一发行件；需要走网络时用公开发布的 `dist/install.sh`（Release 资产）。源码树里的同名两文件是本地 wrapper：只读当前 `package.json` 与 `deploy/bootstrap.mjs`，按脚本所在目录（或其父目录）定位本包，未显式给 `--package` 时自动补上当前包目录；也可用 `--package <包目录>` 显式指定其它本地完整包。
+
 自动识别仅看 `DSH_TAVERN_CLI_HOME`、`DSH_HOME`、当前目录及 `~/.dsh-tavern`；多个目录或找不到时要求 `--home`，不扫描磁盘。`--port` 核对端口，`--systemd-unit` 指定已有单元。
 
 ## 服务、数据与验收
@@ -138,10 +141,12 @@ Linux 不设 180 / 600 秒成功预算，不以 HTTP、插件 ready 或运行能
 
 装卸完成说明本次源码区块和插件目录操作已完成、原状态恢复命令已执行，**不代表**运行兼容、页面或玩法验收；用户须登录刷新确认。
 
+**安全边界（不是安全沙箱）**：服务端 MVU / 卡脚本在 Node `node:vm` 上下文内执行（Linux / macOS / Windows CLI 走进程内路径；Windows 桌面版因打包宿主缺少进程内 vm ESM 能力改由 Worker 承载，选路见 `lib/mvu/vm-capability.js`）。vm 只提供超时、钩子预算与调用窗口校验等“跑飞防护”（`lib/sandbox-policy.js`），**不构成对不可信代码的安全隔离**：realm 逃逸属已知路径（按已知路径收口，不宣称完全阻断）；脚本可见的宿主能力已收为显式 bridge，不再直接暴露裸宿主对象引用，但仍与宿主同进程、同用户权限。API 侧解析路径不使用宿主 `new Function`（F001）。请只运行你信任的人物卡与脚本。
+
 ## 独立发行构建
 
 ```sh
 node scripts/build-release.mjs --out ./dist --repository huajiao1998/dsh-tavern-sqlite-v2
 ```
 
-输出目录须不存在，生成 tgz、Windows zip（`-win.zip`，内含包体＋根 `install.ps1`，该副本带 UTF-8 BOM 分发例外）、固定版本 install.sh、`SHA256SUMS`（tgz＋zip）、`release.json`。构建门禁只核块机制必需模块的**存在与声明**、退役旧资产路径不得回流、vendor 台账（含 acorn）齐全。不上传、不覆盖旧附件，不包含内部测试或运维资料；只有正式发布新 Release 后，公网 latest 才会取得新代。
+输出目录须不存在，生成 tgz、Windows zip（`-win.zip`，内含包体＋根 `install.ps1`，该副本带 UTF-8 BOM 分发例外）、固定版本 install.sh、`SHA256SUMS`（tgz＋zip）、`release.json`。构建门禁核块机制必需模块的**存在与声明**、退役旧资产路径不得回流、vendor 台账（含 acorn）齐全，并核安装入口的版本/URL/SHA 语义与内嵌体一致性（包内二入口不得内嵌本次 tgz 摘要）。不上传、不覆盖旧附件，不包含内部测试或运维资料；只有正式发布新 Release 后，公网 latest 才会取得新代。

@@ -350,6 +350,20 @@ export class SqliteSessionStore {
 		}
 	}
 
+	/** 只窥当前缓存，不会创建/打开库；供精确删除足迹预检使用。 */
+	peek(id) {
+		return this.dbs.get(id)
+	}
+
+	/** 关闭并摘除某个缓存连接；连接所有权仍留在store。 */
+	closeCached(id) {
+		const cached = this.dbs.get(id)
+		if (cached === undefined) return false
+		cached.close()
+		this.dbs.delete(id)
+		return true
+	}
+
 	/** 打开（或复用缓存的）会话库连接。 */
 	open(id) {
 		const cached = this.dbs.get(id)

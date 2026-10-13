@@ -1,9 +1,11 @@
 #!/bin/sh
-# 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
+# 发行 SH 模板（唯一来源）：由 scripts/render-install-sh.mjs 连同 deploy/bootstrap.mjs 与当前 package.json 版本渲染成
+# 包内二入口（install.sh、deploy/install.sh，URL/SHA 保持占位，避免内嵌本次 tgz 摘要自引用）与外部发行件（地址与摘要只填一次）。
+# 源码树两入口不是本模板的产物，而是只读当前 manifest/bootstrap 的本地 wrapper；三者不得各写一份实现。
 set -eu
-RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.9/dsh-tavern-sqlite-v2-0.4.9.tgz'
-RELEASE_SHA256='48bc2aadaf6b8e6b55721d102a30ca6cca65e7977319f263790303cece218c0c'
-VERSION='0.4.9'
+RELEASE_URL='https://github.com/huajiao1998/dsh-tavern-sqlite-v2/releases/download/v0.4.10/dsh-tavern-sqlite-v2-0.4.10.tgz'
+RELEASE_SHA256='cc6540b41d60221a11a24e2d1176e9bdfb42ba648c1b0646fa170d4376de41d1'
+VERSION='0.4.10'
 SCRIPT_DIR=''
 case "$0" in
   *install.sh) SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) ;;

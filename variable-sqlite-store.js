@@ -11,6 +11,7 @@ import path from 'node:path'
  * - variable_snapshots：每轮结算后的完整变量树（回退物理删除的对象；时间旅行 = turn<=N 最新一行）
  * - variable_state：当前态单行缓存（脚本级小写只更新它；回退后从快照链回拨）
  */
+/** @deprecated V2现役变量链使用 lib/variable-archive.js；仅保留公开旧API兼容，下一大版本前不要新增消费者。 */
 export function createVariableSqliteStore(options = {}) {
   const chatsRoot = path.resolve(String(options.chatsRoot || ''))
   if (chatsRoot === '') throw new Error('Variable SQLite Store 缺少 chatsRoot')

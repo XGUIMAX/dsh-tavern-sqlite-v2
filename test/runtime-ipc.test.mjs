@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Worker } from 'node:worker_threads'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createSharedSlot, createHostChannel, STATE_IDLE } from '../lib/mvu/runtime-ipc.js'
+import { createSharedSlot, createHostChannel, inspectChannel, STATE_REQUEST } from '../lib/mvu/runtime-ipc.js'
 
 const ipcUrl = pathToFileURL(fileURLToPath(new URL('../lib/mvu/runtime-ipc.js', import.meta.url))).href
 
@@ -68,7 +68,8 @@ test('runtime-ipc：同步值/抛错/异步尾部/同步前缀时序', async () 
   const outcome = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('测试 Worker 超时 20s')), 20000)
     worker.on('message', message => {
-      if (message && message.type === 'hostcall') { channel.serve(invoke, m => worker.postMessage(m)); return }
+      // hostcall 必须连同消息交给通道：宿主按 {seq, slot} 与槽配对后才执行宿主 API。
+      if (message && message.type === 'hostcall') { channel.serve(message, invoke, m => worker.postMessage(m)); return }
       if (message && message.type === 'ticket') return
       if (message && (message.type === 'done' || message.type === 'failed')) { clearTimeout(timer); resolve(message) }
     })
@@ -85,7 +86,9 @@ test('runtime-ipc：同步值/抛错/异步尾部/同步前缀时序', async () 
   assert.deepEqual(steps.get('asyncSettled'), ['done'], '异步尾部结果必须结算到 Worker 侧 Promise')
   assert.deepEqual(steps.get('counterAfterTail'), [11], '异步尾部必须在 Worker 继续后可见其效果')
   assert.equal(channel.pendingTickets(), 0, 'ticket 必须全部结算，不留悬挂')
-  assert.equal(Atomics.load(new Int32Array(sab, 0, 16), 1) !== STATE_IDLE, true, '通道最终必须离开 IDLE')
+  const snapshot = inspectChannel(sab)
+  assert.equal(snapshot.invalid, false, '正常路径不得作废通道')
+  assert.equal(snapshot.slots.some(slot => slot.state === STATE_REQUEST), false, '不得有槽停在 REQUEST（响应必须已发布）')
 })
 
 test('runtime-ipc：同步等待超时即响亮失败（不死等）', async () => {
@@ -108,4 +111,5 @@ import(workerData.ipcUrl).then(({ createWorkerChannel }) => {
   })
   await worker.terminate()
   assert.equal(outcome.code, 'RUNTIME_IPC_TIMEOUT', '宿主不服务必须响亮超时失败')
+  assert.equal(inspectChannel(sab).invalid, true, '同步超时必须作废通道（禁止继续复用）')
 })

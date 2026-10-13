@@ -8,6 +8,7 @@ import path from 'node:path'
 import { bootstrapOptions, installedPackage, validatePackage, selectLocal, bootstrap } from '../deploy/bootstrap.mjs'
 import { createStandardInstallation, installOwnedRows, pluginDirFor } from '../deploy/maintenance/standard-installation.mjs'
 import { copyPackage } from '../deploy/maintenance/runner.mjs'
+import { installShInputs, renderInstallSh, installShBody, localInstallEntrySh, PACK_INSTALL_ENTRIES } from '../scripts/render-install-sh.mjs'
 import { fileURLToPath } from 'node:url'
 const product = fileURLToPath(new URL('../', import.meta.url))
 
@@ -179,14 +180,12 @@ test('获取器：标准目录本地执行器复用且双源拒绝', async () =>
   } finally { drop(root) }
 })
 
-// 静态文本对齐：install.sh 内嵌的获取器必须与 bootstrap.mjs 同一函数**同文本**（单次比对，不执行发行构建、不算 SHA）。
-test('获取器：install.sh 内嵌体与 bootstrap 源同文本', () => {
+// 静态文本对齐：源码树入口是**单源 wrapper**；真正随包发行的渲染件（模板＋获取器源＋当前版本）内嵌体必须与
+// bootstrap.mjs **同文本**（单次比对，不执行发行构建、不算 SHA）。
+test('获取器：源码树入口为单源wrapper，渲染件与bootstrap源同文本', () => {
   const read = rel => fs.readFileSync(path.join(product, rel), 'utf8')
-  const slice = (text, source) => {
-    const start = text.indexOf('export function installedPackage')
-    assert.notEqual(start, -1, source + ' 必须含 export function installedPackage')
-    const stop = text.indexOf('\n//', start)
-    return text.slice(start, stop === -1 ? text.length : stop).trimEnd()
-  }
-  assert.equal(slice(read('deploy/install.sh'), 'deploy/install.sh'), slice(read('deploy/bootstrap.mjs'), 'deploy/bootstrap.mjs'), '内嵌获取器与源必须逐字一致')
+  const wrapper = localInstallEntrySh()
+  for (const rel of PACK_INSTALL_ENTRIES) assert.equal(read(rel), wrapper, rel + ' 必须是单源 wrapper 文本（不得内嵌旧副本）')
+  const inputs = installShInputs(product)
+  assert.equal(installShBody(renderInstallSh({ ...inputs })), read('deploy/bootstrap.mjs'), '渲染件内嵌获取器与源必须逐字一致')
 })

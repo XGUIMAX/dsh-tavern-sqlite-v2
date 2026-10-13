@@ -25,11 +25,16 @@ function fixture(t) {
   const pathOf = id => path.join(root, 'sessions', id + '.db')
   const bind = (id, binding, identity = id) => { for (const suffix of ['', '-wal', '-shm']) rmSync(pathOf(id) + suffix, { force: true }); restoreDatabase(pathOf(id), 'native', tables(identity)); const db = new DatabaseSync(pathOf(id)); db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('rollback_archive',?)").run(binding); db.close() }
   const dbs = new Map(), closed = [], handles = []
-  const store = { exists: id => existsSync(pathOf(id)), pathOf, dbs }
+  // 与真实 SqliteSessionStore 同接口（2026-10-13 接口改名）：窥探不创建、关闭即摘除并记 closed
+  const peek = id => dbs.get(id)
+  const closeCached = id => { const entry = dbs.get(id); if (entry === undefined) return false; entry.close(); dbs.delete(id); return true }
+  const store = { exists: id => existsSync(pathOf(id)), pathOf, dbs, peek, closeCached }
   const host = { store, tracker: { openHandles: handles }, assertWritable(id) { if (!store.exists(id)) throw Error('原件只读') } }
   return {
-    root, chatId, archive, pathOf, bind, dbs, closed, handles, host, validate: makeDelete(DatabaseSync, path),
-    cache(id) { const db = new DatabaseSync(pathOf(id)); dbs.set(id, { db, close() { closed.push(id); db.close() } }) }
+    root, chatId, archive, pathOf, bind, dbs, closed, handles, host: { ...host, store: { ...host.store, peek, closeCached } }, validate: makeDelete(DatabaseSync, path),
+    cache(id) { const db = new DatabaseSync(pathOf(id)); dbs.set(id, { db, close() { closed.push(id); db.close() } }) },
+    peek,
+    closeCached
   }
 }
 test('DB删局扁平足迹校验归属且活动句柄延后', async t => {
@@ -152,7 +157,10 @@ function nativeFixture(t) {
   const archiveFor = chat => path.join(chatsRoot, chat, 'archive.db')
   const pathOf = id => path.join(sessionsRoot, id + '.db')
   const store = new SqliteSessionStore(sessionsRoot)
-  const host = { store: { exists: id => existsSync(pathOf(id)), pathOf, dbs }, tracker: { openHandles: handles }, assertWritable(id) { if (!existsSync(pathOf(id))) throw Error('原件只读') } }
+  // 与真实 SqliteSessionStore 同接口（2026-10-13 接口改名）：host.store 需可 peek/closeCached（本 fixture 用自有 dbs 记账 closed）
+  const peek = id => dbs.get(id)
+  const closeCached = id => { const entry = dbs.get(id); if (entry === undefined) return false; entry.close(); dbs.delete(id); return true }
+  const host = { store: { exists: id => existsSync(pathOf(id)), pathOf, dbs, peek, closeCached }, tracker: { openHandles: handles }, assertWritable(id) { if (!existsSync(pathOf(id))) throw Error('原件只读') } }
   return {
     root, chatId, FG, BG, X, BAD, archiveFor, pathOf, store, dbs, closed, handles, host,
     validate: makeDelete(DatabaseSync, path),
@@ -290,7 +298,10 @@ function deferredFixture(t) {
   restoreDatabase(archive, 'archive', ARCHIVE_TABLES(chatId, FG))              // 真实 Chat 档：archive_head_fields 的 id/sessionId 供归属互证
   const sessionStore = new SqliteSessionStore(sqlRoot)                          // 真实产品 store：root/pathOf/exists
   const dbs = new Map(), closed = [], handles = []
-  const store = { root: sessionStore.root, exists: id => sessionStore.exists(id), pathOf: id => sessionStore.pathOf(id), dbs }
+  const store = { root: sessionStore.root, exists: id => sessionStore.exists(id), pathOf: id => sessionStore.pathOf(id), dbs,
+    // 与真实 SqliteSessionStore 同接口（2026-10-13 接口改名）：本 fixture 用自有 dbs 记账 closed
+    peek: id => dbs.get(id),
+    closeCached(id) { const entry = dbs.get(id); if (entry === undefined) return false; entry.close(); dbs.delete(id); return true } }
   const host = { store, tracker: { openHandles: handles }, assertWritable() {} }
   t.after(() => { for (const entry of dbs.values()) { try { entry.close() } catch { /* 已关闭 */ } } dbs.clear() })
   return {
@@ -313,6 +324,9 @@ function deferredFixture(t) {
     pendingPath: path.join(dataRoot, 'pending-session-deletions.json'),
     pending() { try { return JSON.parse(readFileSync(this.pendingPath, 'utf8')) } catch { return null } },
     cache(id) { if (dbs.has(id)) return; const db = new DatabaseSync(sessionStore.pathOf(id), { readOnly: true }); dbs.set(id, { db, close() { closed.push(id); db.close() } }) },
+    // 与真实 SqliteSessionStore 同接口（2026-10-13 接口改名）：窥探不创建、关闭即摘除并记 closed
+    peek: id => dbs.get(id),
+    closeCached(id) { const entry = dbs.get(id); if (entry === undefined) return false; entry.close(); dbs.delete(id); return true },
     closeAll() { for (const entry of dbs.values()) { try { entry.close() } catch { /* 已关闭 */ } } dbs.clear(); handles.length = 0 },
   }
 }

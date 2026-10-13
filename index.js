@@ -447,7 +447,7 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		for (const id of targets) {
 			if (!this.store.exists(id)) continue
 			this.assertWritable(id)
-			const cached = this.store.dbs.get(id), file = this.store.pathOf(id)
+			const cached = this.store.peek(id), file = this.store.pathOf(id)
 			const read = cached?.db ?? new DatabaseSync(file, { readOnly: true, allowExtension: false })
 			let binding, sessionId
 			try {
@@ -478,7 +478,7 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		const handles = this.tracker?.openHandles
 		if (handles === undefined || handles === null || typeof handles[Symbol.iterator] !== 'function') throw Error('DB删局缺少可枚举句柄跟踪，拒绝判定归属')
 		const active = new Set([...handles].map(handle => handle?.id))
-		for (const { id } of prepared) if (!active.has(id)) { this.store.dbs.get(id)?.close(); this.store.dbs.delete(id) }
+		for (const { id } of prepared) if (!active.has(id)) this.store.closeCached(id)
 		return prepared.flatMap(({ id, file }) => [file, file + '-wal', file + '-shm'].map(target => ({ category: 'subsession', kind: 'file', path: target, sessionId: id, foreground: id === foregroundId, ...(active.has(id) ? { deferred: true } : {}) })))
 	}
 	/**
@@ -507,7 +507,7 @@ export default class TavernSessionPersistence extends JsonlSessionPersistence {
 		const file = this.store.pathOf(id)
 		if (dbSaveTargets.get(file) !== id) throw Error('仅可回收本次未发布的DB新目标')
 		if ([...(this.tracker?.openHandles || [])].some(handle => handle.id === id)) throw Error('DB新目标仍有活动句柄，拒绝删除')
-		this.store.dbs.get(id)?.close(); this.store.dbs.delete(id)
+		this.store.closeCached(id)
 		for (const suffix of ['', '-wal', '-shm']) rmSync(file + suffix, { force: true })
 		dbSaveTargets.delete(file)
 	}

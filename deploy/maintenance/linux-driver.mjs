@@ -7,7 +7,7 @@ import { systemdOwner, parseSystemdProperties } from './systemd.mjs'
 import { runtimeFor } from './target.mjs'
 import { createStandardInstallation } from './standard-installation.mjs'
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))
-export function createLinuxDriver(op,adapter,packageRoot,evidence,{processFinder=findProcess,runCommand=command,alive=processAlive,spawnProcess=spawn}={}){
+export function createLinuxDriver(op,adapter,packageRoot,evidence,{processFinder=findProcess,runCommand=command,alive=processAlive,spawnProcess=spawn,stopWindowMs=30000}={}){
  const context={...op,...runtimeFor({...op,simpleMaintenance:true},{platform:'linux'}),simpleMaintenance:true}
  const assembly=createStandardInstallation({op,adapter,packageRoot,evidence,simple:true,linkPeers:()=>{
   // 安装必要模块路径只建链接，不作resolve/版本/能力验证，不下载第二份宿主。
@@ -32,11 +32,13 @@ export function createLinuxDriver(op,adapter,packageRoot,evidence,{processFinder
    if(!wasRunning)return
    if(unit)runCommand('systemctl',['stop',unit],{timeout:30000})
    else if(original&&alive(original.pid))process.kill(original.pid,'SIGTERM')
-   if(original){const until=Date.now()+30000;while(alive(original.pid)&&Date.now()<until)await pause(50);if(alive(original.pid))throw Error('原酒馆尚未停止，未注入')}
+   if(original){const until=Date.now()+stopWindowMs;while(alive(original.pid)&&Date.now()<until)await pause(50);if(alive(original.pid))throw Error('原酒馆尚未停止，未注入')}
    stopped=true
   },
   async start(){
    if(!wasRunning)return {state:'stopped'}
+   // 停服未确证（stop 抛错/未走到确认）且原PID仍活：绝不代启第二份进程，保持原运行状态，恢复不冒认成功。
+   if(!stopped&&original&&alive(original.pid))return {state:'running',skipped:'original-still-alive',pid:original.pid}
    if(unit)runCommand('systemctl',['start',unit],{timeout:10000})
    else{
     const fd=fs.openSync(path.join(evidence,'startup.log'),'a',0o600)

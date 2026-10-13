@@ -3,7 +3,7 @@ const MARKER='// [dsh-tavern-regeneration-physical:v1]'
 function once(source,old,next){if(source.split(old).length!==2)throw Error('正文物理采用锚点缺失/不唯一：'+old.slice(0,100));return source.replace(old,next)}
 export function applyRegenerationAdoptionTransform(source){
  if(source.includes(MARKER)){
-  for(const key of ['const regenerationRecovery = createRegenerationAdoption(', 'adoption: regenerationRecovery.plan(', 'restore: regenerationRestore.record'])if(!source.includes(key))throw Error('正文物理采用接线不完整')
+  for(const key of ['const regenerationRecovery = createRegenerationAdoption(', 'const adoption = regenerationRecovery.plan(', 'restore: regenerationRestore.record'])if(!source.includes(key))throw Error('正文物理采用接线不完整')
   return source
  }
  source=once(source,"import { createRegenerationRecovery } from './regeneration-recovery.js'",MARKER+"\nimport { createRegenerationAdoption } from './storage-rollback.js'")
@@ -17,9 +17,8 @@ export function applyRegenerationAdoptionTransform(source){
     let originalChat = structuredClone(chat)`)
  source=once(source,'        ...(Number(current._storageRevision || 0) ? {} : { before: structuredClone(current) }),','        restore: regenerationRestore.record,')
  source=once(source,'      next.regenRecovery = { id: operationId, beforeRevision: Number(current._storageRevision || 0),','      next.regenRecovery = { id: operationId, turn: oldTurn,')
- source=once(source,"        next.regenRecovery = { ...current.regenRecovery, phase: 'committed', projection }",`        next.regenRecovery = { ...current.regenRecovery, phase: 'committed',
-          adoption: regenerationRecovery.plan(session, { oldTurn, syntheticTurn, eventStart, oldSeq, chatId: chat.id }) }`)
- source=once(source,'        const next = merged.chat\n        retainRegenerationRollbackState(next, originalChat, regenerationCheckpoint)',`        const next = regenerationRecovery.adopted(merged.chat, { oldTurn, syntheticTurn, generatedAssistant: currentAssistant, originalAssistant: originalChat.messages[oldAssistantIndex] })
+ source=once(source,"        next.regenRecovery = { ...current.regenRecovery, phase: 'committed', projection }",`        next.regenRecovery = { ...current.regenRecovery, phase: 'committed', projection, adoption }`)
+ source=once(source,'        const next = merged.chat\n        retainRegenerationRollbackState(next, originalChat, regenerationCheckpoint)',`        const adoption = regenerationRecovery.plan(session, { oldTurn, syntheticTurn, eventStart, oldSeq, chatId: chat.id })\n        const next = regenerationRecovery.adopted(merged.chat, { oldTurn, syntheticTurn, generatedAssistant: currentAssistant, originalAssistant: originalChat.messages[oldAssistantIndex], adoption })
         retainRegenerationRollbackState(next, originalChat, regenerationCheckpoint)`)
  source=once(source,`        next.regeneratedDshTurns = next.regeneratedDshTurns && typeof next.regeneratedDshTurns === 'object' && !Array.isArray(next.regeneratedDshTurns)
           ? structuredClone(next.regeneratedDshTurns) : {}

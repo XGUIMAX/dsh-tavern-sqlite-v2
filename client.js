@@ -95,10 +95,14 @@ window.__ModuleLoader__.load({
       && result.readonly === true && /^legacy:\d+:\d+$/.test(result.stamp || '')
 
     /**
-     * 目标身份比较的**唯一实现**（与 deploy/error-purge-transform.mjs 的 TARGET_COMPARE 逐字同规则）：
-     * kind（body/native-only 二者之一）/ turn / branchId / revision 必须 exact；body 认非空 operationId；
-     * native-only 不得带 operationId 且 endSeq/eventCount === endSeq+1；chatId/sessionId 仅在两边都是字符串时比。
+     * 目标身份比较的**唯一实现**（浏览器侧）：kind（body/native-only 二者之一）/ turn / branchId / revision
+     * 必须 exact；body 认非空 operationId；native-only 不得带 operationId 且 endSeq/eventCount === endSeq+1；
+     * chatId/sessionId 仅在两边都是字符串时比；另加 incomplete 与不完整轮末尾坐标一致性校验。
      * 返回 "" 表示同一身份，否则返回不一致原因（用于拒绝清理与拒绝接受回执）。
+     *
+     * 与 deploy/error-purge-transform.mjs 的 TARGET_COMPARE_LINES **不是**逐字同规则（2026-10-13 核对）：
+     * 那份自述"仅用于严格识别旧 marked 菜单的升级输入"，且缺 incomplete/endSeq 校验 ⇒ 是更旧的子集。
+     * 两者运行时分处浏览器 bundle 与 host transform，本轮不合并、不猜共享机制；改任一份都需同时核另一份语义。
      */
     function targetCompare(ft, cft) {
       if (!ft || !cft || typeof ft !== 'object' || typeof cft !== 'object') return '目标缺失'

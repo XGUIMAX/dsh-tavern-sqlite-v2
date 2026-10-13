@@ -6,10 +6,11 @@
 //
 // 只用 node 内置：node test/unmigrated-guard.test.mjs
 import assert from 'node:assert/strict'
+import test from 'node:test'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { assertPlayable, chatIdForSession, isChatMigrated } from '../lib/tavern-chat-state.js'
+import { assertPlayable, chatIdForSession, invalidateLinkMap, isChatMigrated } from '../lib/tavern-chat-state.js'
 
 const home = mkdtempSync(path.join(os.tmpdir(), 'tavern-guard-home-'))
 const dataRoot = path.join(home, 'profile-data', 'tavern', 'data')
@@ -64,3 +65,33 @@ try {
 }
 
 console.log('unmigrated-guard: 6 组断言全部通过（未迁移档开始轮次被拦 / 已迁移放行 / 非酒馆会话不拦）')
+
+// 具名叶用例（node:test，2026-10-13 加）：链接表缓存必须按**文件指纹**失效 —— 作者 registry 的外部写入
+//（新建分叉、删档）后立刻可见，不能把 5 秒 TTL 内的 stale 负结果当成"没有绑定"（旧口径会挡写闸/报错）。
+test('链接表缓存：外部改写 sessions.json 后立刻可见（不留 stale 负结果）', () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'tavern-guard-cache-home-'))
+  const dataRoot = path.join(home, 'profile-data', 'tavern', 'data')
+  const previousHome = process.env.DSH_HOME
+  try {
+    mkdirSync(path.join(home, 'profiles', 'tavern'), { recursive: true })
+    writeFileSync(path.join(home, 'profiles', 'tavern', 'package.json'), JSON.stringify({ name: 'dsh-profile-tavern', dshTavern: { dataRoot } }))
+    mkdirSync(path.join(dataRoot, 'chats'), { recursive: true })
+    process.env.DSH_HOME = home
+    const links = path.join(dataRoot, 'sessions.json')
+    writeFileSync(links, JSON.stringify({ 'session-a': 'chat-a' }))
+    assert.equal(chatIdForSession('session-a'), 'chat-a')
+    assert.equal(chatIdForSession('session-b'), '', '未写链接时先落一个负结果进缓存')
+    // 外部写：同一进程之外改写链接表（作者 registry 新建分叉；内容更长 ⇒ 指纹必变）
+    writeFileSync(links, JSON.stringify({ 'session-a': 'chat-a', 'session-b': 'chat-b' }))
+    assert.equal(chatIdForSession('session-b'), 'chat-b', '外写后必须立刻可见，不能等 5 秒 TTL')
+    assert.equal(chatIdForSession('session-a'), 'chat-a', '未变的旧映射不得丢失')
+    invalidateLinkMap()
+    assert.equal(chatIdForSession('session-b'), 'chat-b', '显式失效后仍应读到同一权威映射')
+    // 链接在、档不存在：仍按"不是只读原档"放行（交给上层报找不到档）
+    assert.doesNotThrow(() => assertPlayable('session-b'))
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})

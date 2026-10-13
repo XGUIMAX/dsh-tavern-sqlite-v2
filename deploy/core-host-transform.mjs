@@ -88,14 +88,23 @@ const BODY_EDIT_EVENT_NEW_WITH_ADOPTION = `      case 'saveBodyEdit': {
         notifyPluginTimeline(args && args.sessionId, 'edit', { settled: true })
         return { view }
       }`
-function bodyEditEventBody(keepAuthorNotify, adoptUncommitted = false) {
+// 上游 537e878（#196）把编辑前的"补记在途轮"升级为完整对账器：reconcileStory 只在 idle 时
+// 核对存档与原生会话，可证明的漏记才补写。它与本插件是**协作**关系而非替代：
+// 补记是否合法仍由 storage-failure-state/rollback-body-commit 的护栏判定，这里只换锚点形态。
+const BODY_EDIT_EVENT_NEW_WITH_RECONCILE = `      case 'saveBodyEdit': {
+        await reconcileStory(args && args.sessionId)
+        const view = await bodyEditor.save(args && args.sessionId, args)
+        notifyPluginTimeline(args && args.sessionId, 'edit', { settled: true })
+        return { view }
+      }`
+function bodyEditEventBody(keepAuthorNotify, adoptUncommitted = false, reconcile = false) {
   return `      case 'saveBodyEdit': {
         ${BODY_EDIT_EVENT_MARKER}
         // 正文编辑的服务端事件在作者已同步原生Surface之后派发；只观察最后一楼，不扫描历史。
         const sessionId = args && args.sessionId
         const chatId = (await readSessionMap())[sessionId]
         const before = chatId && await chatPersistence.readWindow(chatId, { limit: 1 })
-        ${adoptUncommitted ? "await adoptUncommittedRounds(sessionId)\n        " : ''}const bodyView = await bodyEditor.save(sessionId, args)${keepAuthorNotify ? "\n        notifyPluginTimeline(sessionId, 'edit', { settled: true })" : ''}
+        ${adoptUncommitted ? "await adoptUncommittedRounds(sessionId)\n        " : ''}${reconcile ? "await reconcileStory(sessionId)\n        " : ''}const bodyView = await bodyEditor.save(sessionId, args)${keepAuthorNotify ? "\n        notifyPluginTimeline(sessionId, 'edit', { settled: true })" : ''}
         const after = chatId && await chatPersistence.readWindow(chatId, { limit: 1 })
         const oldText = before?.chat?.messages?.[0]?.sourceText ?? before?.chat?.messages?.[0]?.text
         const newText = after?.chat?.messages?.[0]?.sourceText ?? after?.chat?.messages?.[0]?.text
@@ -136,7 +145,7 @@ function bodyEditTextBody() {
 
 export function applyBodyEditEventTransform(source) {
   if (source.includes(BODY_EDIT_EVENT_MARKER)) {
-    const injectedBodies = [bodyEditEventBody(true, true), bodyEditEventBody(true, false), bodyEditEventBody(false, true), bodyEditEventBody(false, false)]
+    const injectedBodies = [bodyEditEventBody(true, true), bodyEditEventBody(true, false), bodyEditEventBody(false, true), bodyEditEventBody(false, false), bodyEditEventBody(true, false, true)]
     if (!injectedBodies.some(body => source.includes(body))) throw new Error('正文编辑接缝已注入但内容不符')
     // 旧 marker 不得充当新入口的安全证：声明了 editText 属性就必须是**完整已注入体**（半缺/被还原/未知一律拒）
     const textDeclaredAny = /\beditText\s*:/.test(source)
@@ -148,11 +157,23 @@ export function applyBodyEditEventTransform(source) {
   }
   const hasNewWithAdoption = source.split(BODY_EDIT_EVENT_NEW_WITH_ADOPTION).length === 2
   const hasNew = source.split(BODY_EDIT_EVENT_NEW).length === 2
+  const hasReconcile = source.split(BODY_EDIT_EVENT_NEW_WITH_RECONCILE).length === 2
   const hasLegacy = source.split(BODY_EDIT_EVENT_LEGACY).length === 2
-  if (hasNewWithAdoption && hasNew) throw new Error('正文编辑接缝新作者锚点重复')
-  if (!hasNewWithAdoption && hasNew === hasLegacy) throw new Error('正文编辑接缝锚点缺失或重复')
-  const keepAuthorNotify = hasNewWithAdoption || hasNew
-  let next = source.replace(hasNewWithAdoption ? BODY_EDIT_EVENT_NEW_WITH_ADOPTION : (hasNew ? BODY_EDIT_EVENT_NEW : BODY_EDIT_EVENT_LEGACY), bodyEditEventBody(keepAuthorNotify, hasNewWithAdoption))
+  // 四种作者形态互不为子串；恰一命中才施缝。多形态/零形态都是未知布局，一律拒（不猜、不兼容降级）。
+  const forms = [['legacy', hasLegacy], ['new', hasNew], ['adoption', hasNewWithAdoption], ['reconcile', hasReconcile]]
+  const hits = forms.filter(entry => entry[1])
+  if (hits.length !== 1) throw new Error('正文编辑接缝锚点缺失或重复')
+  const kind = hits[0][0]
+  const anchor = kind === 'legacy' ? BODY_EDIT_EVENT_LEGACY
+    : kind === 'new' ? BODY_EDIT_EVENT_NEW
+    : kind === 'adoption' ? BODY_EDIT_EVENT_NEW_WITH_ADOPTION
+    : BODY_EDIT_EVENT_NEW_WITH_RECONCILE
+  const keepAuthorNotify = kind !== 'legacy'
+  // 两种作者前置调用都必须原样保留：旧"补记"adoptUncommittedRounds、新对账reconcileStory。
+  // 施缝只接管事件派发窗口，不吞作者的对账/补记语义。
+  const adoptUncommitted = kind === 'adoption'
+  const reconcile = kind === 'reconcile'
+  let next = source.replace(anchor, bodyEditEventBody(keepAuthorNotify, adoptUncommitted, reconcile))
   // 新版独有的插件 editText 入口：出现即必须严格命中一次（未知/重复形态一律拒），旧版无此入口则原样通过。
   const textHits = next.split(BODY_EDIT_TEXT_ANCHOR).length - 1
   const textDeclared = /\beditText\s*:/.test(next)

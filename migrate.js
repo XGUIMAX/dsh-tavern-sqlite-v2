@@ -2,7 +2,7 @@
 // 同 ID 导入入口永久拒绝；用户手动官方分叉才创建新的 SQLite 会话。
 import { closeSync, openSync, readSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { zstdDecompressSync } from "node:zlib"
+import { constants as zlibConstants, zstdDecompressSync } from "node:zlib"
 
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 // jsonl 后端的 canonical 代文件名（v0 为 session.jsonl，v3 为 session.v3.jsonl）
@@ -10,6 +10,9 @@ const CANONICAL_LOG = /^session(?:\.v([1-9][0-9]*))?\.jsonl$/
 // header 只读前缀预算：只取首行 / 首个 zstd 帧，绝不整档解码；超出即失败（不改写、不跳过）。
 const HEADER_PREFIX_LIMIT = 8 * 1024 * 1024
 const HEADER_CHUNK = 64 * 1024
+// header-only 解压输出预算。Node 同步 zstd **没有**部分输出 API：maxOutputLength 一超即抛、
+// 拿不到已产出的前半段 ⇒ 超预算只能有界响亮拒绝，绝不放任"单帧大档"整档解压冒充 header-only。
+const HEADER_DECODE_LIMIT = 64 * 1024 * 1024
 
 /** 与官方 encodeSegment 同契约；只定向授权 ID，不枚举其他会话目录。 */
 function encodeSegment(id) {
@@ -26,6 +29,9 @@ function encodeSegment(id) {
 
 /**
  * 在 jsonl root 里定位某会话的当前代日志文件。
+ * **遍历全部项目目录取最高代**：同一 session id 可能在多个 cwd 目录下各有一份（换 cwd/复制/换机后重新登记
+ * workspace），首个命中目录可能是陈旧副本，或只有一个 .tmp 而没有 canonical 日志；按首个命中定论会把
+ * "原件存在"误判成不存在。不枚举会话目录之外的内容，也不读取正文。
  * @returns { path, version, compressed } 或 undefined。
  */
 export function findJsonlArtifact(root, id) {
@@ -35,35 +41,31 @@ export function findJsonlArtifact(root, id) {
 	} catch {
 		return undefined
 	}
+	let best
 	for (const project of projectDirs) {
 		if (!project.isDirectory()) continue
-		const projectDir = join(root, project.name)
-		{
-			const sessionDir = join(projectDir, encodeSegment(id))
-			let files
-			try {
-				files = readdirSync(sessionDir)
-			} catch {
-				continue
+		const sessionDir = join(root, project.name, encodeSegment(id))
+		let files
+		try {
+			files = readdirSync(sessionDir)
+		} catch {
+			continue
+		}
+		for (const file of files) {
+			if (file.endsWith(".tmp")) continue
+			let base = file
+			let compressed = false
+			if (base.endsWith(".zstd")) {
+				base = base.slice(0, -5)
+				compressed = true
 			}
-			let best
-			for (const file of files) {
-				if (file.endsWith(".tmp")) continue
-				let base = file
-				let compressed = false
-				if (base.endsWith(".zstd")) {
-					base = base.slice(0, -5)
-					compressed = true
-				}
-				const match = CANONICAL_LOG.exec(base)
-				if (match === null) continue
-				const version = match[1] === undefined ? 0 : Number(match[1])
-				if (best === undefined || version > best.version) best = { path: join(sessionDir, file), version, compressed }
-			}
-			return best
+			const match = CANONICAL_LOG.exec(base)
+			if (match === null) continue
+			const version = match[1] === undefined ? 0 : Number(match[1])
+			if (best === undefined || version > best.version) best = { path: join(sessionDir, file), version, compressed }
 		}
 	}
-	return undefined
+	return best
 }
 
 /** 解码整个 jsonl 文件为行数组（首行 header，其余事件行）。多帧 zstd 逐帧解压。 */
@@ -100,6 +102,7 @@ function decodeLines(path, compressed) {
 /**
  * 只读原档前缀：compressed 时读到第一个 zstd 帧边界（下一帧 magic 前）为止，
  * 否则读到首个换行为止。**不读整档、不切行数组、不解事件。**
+ * @returns { prefix, terminated } —— terminated=true 表示 prefix 恰为完整首帧（多帧载体的常态）。
  */
 function readHeaderPrefix(path, compressed) {
 	const fd = openSync(path, "r")
@@ -108,7 +111,7 @@ function readHeaderPrefix(path, compressed) {
 		const chunk = Buffer.allocUnsafe(HEADER_CHUNK)
 		for (;;) {
 			const read = readSync(fd, chunk, 0, HEADER_CHUNK, prefix.length)
-			if (read <= 0) return prefix
+			if (read <= 0) return { prefix, terminated: false }
 			const piece = chunk.subarray(0, read)
 			prefix = prefix.length === 0 ? Buffer.from(piece) : Buffer.concat([prefix, piece])
 			if (prefix.length > HEADER_PREFIX_LIMIT) {
@@ -118,32 +121,57 @@ function readHeaderPrefix(path, compressed) {
 				throw new Error(`session artifact ${path}: unexpected bytes before the first zstd frame`)
 			}
 			const stop = compressed ? prefix.indexOf(ZSTD_MAGIC, ZSTD_MAGIC.length) : prefix.indexOf(0x0a)
-			if (stop >= 0) return prefix.subarray(0, stop)
+			if (stop >= 0) return { prefix: prefix.subarray(0, stop), terminated: compressed }
 		}
 	} finally {
 		closeSync(fd)
 	}
 }
 
-/** 从首个 zstd 帧（或纯文本前缀）取出 header 行文本；解出的帧必须恰好用尽所读字节，否则 fail-closed。 */
-function decodeHeaderLine(path, compressed) {
-	const prefix = readHeaderPrefix(path, compressed)
-	if (prefix.length === 0) return ""
-	if (!compressed) {
-		const text = prefix.toString("utf8")
-		const newline = text.indexOf("\n")
-		return newline < 0 ? text : text.slice(0, newline)
+/** 有界解压一段 zstd 前缀：超预算一律响亮拒绝（不整档解压、不静默截断、不假称 header-only）。 */
+function decodeZstdPrefix(prefix, path, finishFlush) {
+	const options = { info: true, maxOutputLength: HEADER_DECODE_LIMIT }
+	if (finishFlush !== undefined) options.finishFlush = finishFlush
+	try {
+		return zstdDecompressSync(prefix, options)
+	} catch (error) {
+		if (error?.code === "ERR_BUFFER_TOO_LARGE") {
+			throw new Error(`session artifact ${path}: 首帧解压超出 header-only 预算 ${HEADER_DECODE_LIMIT} 字节；Node 同步 zstd 无部分输出 API，拒绝整档解压（请走 open/read 全读路径）`)
+		}
+		throw error
 	}
+}
+
+function firstLineOf(text) {
+	const newline = text.indexOf("\n")
+	return newline < 0 ? text : text.slice(0, newline)
+}
+
+/**
+ * 从首个 zstd 帧（或纯文本前缀）取出 header 行文本。
+ *   ① 多帧载体（prefix 恰为首帧）：严格要求解压恰好用尽所读字节 —— 帧内尾随垃圾仍 fail-closed。
+ *   ② 单帧载体（首帧未终止：整档一个帧、尾随垃圾或截断尾）：用 Z_SYNC_FLUSH 取**部分输出**的首行，
+ *      只服务 header-only 观测（正文完整性由 decodeJsonlSession 的严格全读负责）；输出按预算有界。
+ */
+function decodeHeaderLine(path, compressed) {
+	const { prefix, terminated } = readHeaderPrefix(path, compressed)
+	if (prefix.length === 0) return ""
+	if (!compressed) return firstLineOf(prefix.toString("utf8"))
 	if (prefix.length < ZSTD_MAGIC.length || !prefix.subarray(0, ZSTD_MAGIC.length).equals(ZSTD_MAGIC)) {
 		throw new Error(`session artifact ${path}: unexpected bytes before the first zstd frame`)
 	}
-	const decoded = zstdDecompressSync(prefix, { info: true })
-	if (decoded.engine.bytesWritten !== prefix.length) {
-		throw new Error(`session artifact ${path}: truncated zstd header frame at offset 0`)
+	if (terminated) {
+		const decoded = decodeZstdPrefix(prefix, path)
+		if (decoded.engine.bytesWritten !== prefix.length) {
+			throw new Error(`session artifact ${path}: trailing garbage in zstd frame at offset 0`)
+		}
+		return firstLineOf(decoded.buffer.toString("utf8"))
 	}
-	const text = decoded.buffer.toString("utf8")
-	const newline = text.indexOf("\n")
-	return newline < 0 ? text : text.slice(0, newline)
+	const text = decodeZstdPrefix(prefix, path, zlibConstants.Z_SYNC_FLUSH).buffer.toString("utf8")
+	if (text === "") {
+		throw new Error(`session artifact ${path}: 单帧首帧未在有界前缀内产出 header 行（prefix=${prefix.length} 字节），拒绝整档解压`)
+	}
+	return firstLineOf(text)
 }
 
 /**

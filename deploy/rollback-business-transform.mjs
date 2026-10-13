@@ -124,7 +124,7 @@ export function applyRollbackBusinessTurnTransform(source) {
     } else {
       let next=guard+'\n'+sharedFence+'\n'+value
       next=once(next,'    const rollbackBusinessBefore = captureRollbackBusinessState(chat)','    assertRollbackBodyPreparation(chat)\n    const rollbackBusinessBefore = captureRollbackBusinessState(chat)')
-      next=once(next,"    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })","    assertRollbackBodyPreparation(chat)\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })")
+      next=once(next,"\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })","\n    assertRollbackBodyPreparation(chat)\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })")
       value=next
     }
     if(!value.includes(fenceImport))value=fenceImport+value
@@ -139,6 +139,6 @@ export function applyRollbackBusinessTurnTransform(source) {
   let next = "import { captureRollbackBusinessState } from './storage-rollback-business.js'\n"+marker+'\n'+source
   next = once(next,'    let chatChanged = clearStaleStages(chat, turn)',"    if (chat.rollbackPending) throw new Error('物理回退未完成，请先重试回退，禁止继续生成')\n    const rollbackBusinessBefore = captureRollbackBusinessState(chat)\n    let chatChanged = clearStaleStages(chat, turn)")
   next = once(next,"const begun = timeline.apply({ chat: { ...chat, messages: [] }, intent: { kind: 'body.begin', turn, userText } })", "const begun = timeline.apply({ chat: { ...chat, messages: [] }, intent: { kind: 'body.begin', turn, userText, businessBefore: rollbackBusinessBefore } })")
-  next = once(next,"    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })", "    if (chat.rollbackPending) throw new Error('物理回退未完成，请先重试回退')\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })")
+  next = once(next,"\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })", "\n    if (chat.rollbackPending) throw new Error('物理回退未完成，请先重试回退')\n    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })")
   return captureWorldbookReference(failedBodyFence(next))
 }

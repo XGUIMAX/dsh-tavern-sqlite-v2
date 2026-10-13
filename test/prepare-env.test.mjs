@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { rewriteExecStartVmFlag, findLegacyLeftovers, quarantineLeftovers, describeError, leftoverDecision } from '../deploy/maintenance/environment.mjs'
 import { options } from '../deploy/maintenance/target.mjs'
 import { createDriver } from '../deploy/maintenance/driver.mjs'
@@ -69,12 +70,16 @@ test('引导源头bootstrap.mjs：--prepare-env透传；install.sh/template无�
   assert.deepEqual(parsed.pass, ['--home', '/opt/home', '--systemd-unit', 'dsh-tavern.service', '--prepare-env'], '--prepare-env 必须透传')
   assert.equal(parsed.action, 'install')
   assert.throws(() => mod.bootstrapOptions(['install', '--nonsense']), /未知参数/, '白名单语义保留')
-  // 漂移闸①：工作区 deploy/install.sh 内嵌体必须与 bootstrap.mjs 逐字节一致（构建会用源头覆盖包内副本）。
+  // 漂移闸①：源码树两入口是本地 wrapper（只读当前 manifest/bootstrap），不得内嵌获取器副本、不得写死版本。
+  const { localInstallEntrySh, installShInputs, renderInstallSh, installShBody, PACK_INSTALL_ENTRIES } = await import('../scripts/render-install-sh.mjs')
+  const wrapper = localInstallEntrySh()
+  for (const rel of PACK_INSTALL_ENTRIES) {
+    assert.equal(readFileSync(new URL('../' + rel, import.meta.url), 'utf8'), wrapper, rel + ' 必须与单源 wrapper 文本一致')
+  }
+  // 漂移闸①′：真正随包发行的内嵌体（模板＋获取器源＋当前 manifest 版本渲染件）必须与 bootstrap.mjs 逐字节一致。
   const source = readFileSync(new URL('../deploy/bootstrap.mjs', import.meta.url), 'utf8')
-  const sh = readFileSync(new URL('../deploy/install.sh', import.meta.url), 'utf8')
-  const begin = sh.indexOf("<<'DSH_STORAGE_BOOTSTRAP'"), end = sh.indexOf('\nDSH_STORAGE_BOOTSTRAP', begin)
-  assert.ok(begin > 0 && end > begin, 'install.sh 内嵌块边界未定位')
-  assert.equal(sh.slice(sh.indexOf('\n', begin) + 1, end), source, 'install.sh 内嵌体与 bootstrap.mjs 漂移')
+  const inputs = installShInputs(fileURLToPath(new URL('../', import.meta.url)))
+  assert.equal(installShBody(renderInstallSh({ ...inputs })), source, '渲染件内嵌体与 bootstrap.mjs 漂移')
   // 漂移闸②：模板只允许占位符引用源头，不得自带另一份实现。
   const template = readFileSync(new URL('../deploy/install.template.sh', import.meta.url), 'utf8')
   assert.ok(template.includes('__DSH_BOOTSTRAP_SOURCE__'), '模板必须引用 bootstrap.mjs 占位符')

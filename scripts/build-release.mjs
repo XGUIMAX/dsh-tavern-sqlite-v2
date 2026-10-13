@@ -59,19 +59,30 @@ fs.writeFileSync(path.join(packRoot, RELEASE_GUIDE), fs.readFileSync(path.join(r
 // 包内中文文件名跨平台解码不可靠（Windows tar 默认按系统代码页写条目，曾把中文名写成乱码），
 // 中文安装指南改用 ASCII 文件名，用户入口一律用它，构建门禁同时拒绝 README 回流。
 // （指南已在包完整性门禁之前写盘，见上方。）
-const source = fs.readFileSync(path.join(root, 'deploy', 'bootstrap.mjs'), 'utf8')
-const template = fs.readFileSync(path.join(root, 'deploy', 'install.template.sh'), 'utf8')
-// 替换一律用函数形式：replacement 字符串里的 $&/$` 等会被当替换模式展开
-// （实测源码含正则转义 '$&' 时生成物被写坏）；函数形式杜绝一切 $ 序列解释。
-const embedded = template.replace('__DSH_RELEASE_VERSION__', () => pkg.version).replace('__DSH_BOOTSTRAP_SOURCE__', () => source)
-// 包内入口本地即用；联网地址由发行副本填入，避免tgz摘要自引用。
-fs.writeFileSync(path.join(packRoot, 'deploy', 'install.sh'), embedded, 'utf8')
+// —— 安装入口单源渲染（scripts/render-install-sh.mjs）——
+// 包内二入口与外部发行件由**同一渲染器**从模板＋获取器源＋当前 manifest 版本产出，安装器版本与内容不可能各写一份：
+// 包内保持 URL/SHA 占位（tgz 摘要一旦内嵌即自引用）；外部件在 tgz 摘要产出后由同一函数填一次地址与摘要。
+// 替换一律用函数形式（见渲染器）：replacement 字符串里的 $&/$` 等会被当替换模式展开（实测曾把生成物写坏）。
+const { installShInputs, renderInstallSh, assertInstallShSemantics, PACK_INSTALL_ENTRIES, PLACEHOLDER_URL } = await import('./render-install-sh.mjs')
+const installInputs = installShInputs(root)
+const embedded = renderInstallSh({ ...installInputs })
+{
+  const declared = packageFiles(root).filter(packFilter)
+  for (const rel of PACK_INSTALL_ENTRIES) {
+    if (!declared.includes(rel.split('/').join(path.sep))) throw Error('包内安装入口未在 files 声明：' + rel + '；拒绝出包')
+    fs.writeFileSync(path.join(packRoot, rel), embedded, 'utf8')
+  }
+}
 const tarball = pkg.name + '-' + pkg.version + '.tgz', result = spawnSync('tar', ['-czf', path.join(out, tarball), '-C', out, 'package'], { stdio: 'inherit', timeout: 10000, windowsHide: true })
 if (result.error) throw result.error
 if (result.status !== 0) throw Error('打包失败')
 const digest = createHash('sha256').update(fs.readFileSync(path.join(out, tarball))).digest('hex')
-const url = values.repository ? `https://github.com/${values.repository}/releases/download/${tag}/${tarball}` : '__DSH_RELEASE_URL__'
-fs.writeFileSync(path.join(out, 'install.sh'), embedded.replace('__DSH_RELEASE_URL__', () => url).replace('__DSH_RELEASE_SHA256__', () => digest), 'utf8')
+const url = values.repository ? `https://github.com/${values.repository}/releases/download/${tag}/${tarball}` : PLACEHOLDER_URL
+// 外部发行件：与包内同一渲染器、同一份输入，只多这一次地址/摘要；摘要只在此处算过一次，渲染器只核对不再重算。
+if (embedded.includes(digest)) throw Error('包内安装入口不得内嵌本次 tgz 摘要（避免自引用）：拒绝出包')
+const releaseShell = renderInstallSh({ ...installInputs, url, sha256: digest })
+assertInstallShSemantics(releaseShell, { ...installInputs, url, sha256: digest, label: 'dist/install.sh' })
+fs.writeFileSync(path.join(out, 'install.sh'), releaseShell, 'utf8')
 // —— Windows 一键包（0.2.3）：zip 顶层目录 dsh-tavern-sqlite-v2/ = 包体 + 根 install.ps1 ——
 // 分发例外：zip 内 install.ps1 带 UTF-8 BOM（PowerShell 5.1 对无 BOM 脚本按 ANSI 解码，中文提示会乱码）。
 // tgz 内保持无 BOM（POSIX 侧 PowerShell 7 按 UTF-8 读，且仓库源码规约是无 BOM/LF）。

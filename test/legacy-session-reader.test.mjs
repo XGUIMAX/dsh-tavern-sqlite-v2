@@ -3,6 +3,8 @@
 // 不是对真实宿主恢复策略、真实Session事件关系或UI历史的验收。
 // 只用Node内置：node test/legacy-session-reader.test.mjs
 import assert from 'node:assert/strict'
+import test from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -273,3 +275,124 @@ try {
 }
 
 console.log('legacy-session-reader：绑定缺失零副作用、真实SID选择/旧SID不别名、投影不改原对象、请求参数模拟契约（不证真实主机策略）、header-only观测只构造restore取header、原件字节完整、句柄只读通过（非真Session/UI验收）')
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 具名叶用例（node:test，2026-10-13 加）：只覆盖本轮实际改动的调用路径 ——
+//   ① migrate.js header-only 的单帧有界解码（坏尾读头 / 大正文读头 / 超预算响亮拒绝）；
+//   ② legacy-bindings.js 整表快照缓存（外部写按文件指纹失效 / 缺表按空表）。
+// 每个用例自带 DSH_HOME 与独立 mkdtemp 子树；只清自己创建的那一层。
+// ─────────────────────────────────────────────────────────────────────────────
+
+function singleFrameArtifact(file, header, body) {
+  mkdirSync(path.dirname(file), { recursive: true })
+  const head = Buffer.from(JSON.stringify(header) + '\n', 'utf8')
+  const bodyBuffer = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8')
+  const payload = Buffer.allocUnsafe(head.length + bodyBuffer.length)
+  head.copy(payload, 0)
+  bodyBuffer.copy(payload, head.length)
+  writeFileSync(file, zstdCompressSync(payload))
+}
+
+/** 独立 DSH_HOME（绑定库路径由它决定）；跑完恢复环境并只清本层 mkdtemp。 */
+function withIsolatedHome(label, body) {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'tavern-' + label + '-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try { return body(home) } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+}
+
+function withTempRoot(label, body) {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'tavern-' + label + '-'))
+  try { return body(root) } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) }
+}
+
+test('legacy header-only 单帧 zstd：截断尾/尾随垃圾仍只读 header，全读保持 fail-closed', () => {
+  withTempRoot('single-frame', root => withIsolatedHome('single-frame-home', () => {
+    const id = 'session-single-frame'
+    const header = { id, version: 3, cwd: path.join(root, 'ws') }
+    const body = Array.from({ length: 4000 }, (_, index) => '正文行 ' + index + ' ' + index.toString(16).padStart(8, '0')).join('\n')
+    const file = path.join(root, 'fixture-project', id, 'session.v3.jsonl.zstd')
+    singleFrameArtifact(file, header, body)
+    // 坏尾：完整单帧之后再追加垃圾字节。旧口径要求"解压恰好用尽所读字节" ⇒ header 观测直接失败。
+    writeFileSync(file, Buffer.concat([readFileSync(file), Buffer.from('坏尾部', 'utf8')]))
+    const statFormat = strictFixtureFormat(0)
+    const observed = statLegacySession(root, id, statFormat)
+    assert.equal(observed.meta.id, id, '单帧坏尾仍必须能读 header')
+    assert.deepEqual(statFormat.calls[0].rows, [], 'header-only 不得 decodeRow')
+    assert.equal(statFormat.calls[0].finishes, 0, 'header-only 不得 finish')
+    assert.throws(() => readLegacySession(root, id, strictFixtureFormat()), /trailing garbage/, '全读路径仍必须 fail-closed')
+  }))
+})
+
+test('legacy header-only 单帧 zstd：大压缩正文（解压远大于前缀）仍只读 header', () => {
+  withTempRoot('single-frame-big', root => withIsolatedHome('single-frame-big-home', () => {
+    const id = 'session-single-frame-big'
+    const header = { id, version: 3, cwd: path.join(root, 'ws') }
+    const file = path.join(root, 'fixture-project', id, 'session.v3.jsonl.zstd')
+    singleFrameArtifact(file, header, '重复正文 '.repeat(1024 * 1024))     // ≈8MiB 正文压成很小的单帧
+    const statFormat = strictFixtureFormat(0)
+    assert.equal(statLegacySession(root, id, statFormat).meta.id, id, '大正文单帧必须仍能只读 header')
+    assert.deepEqual(statFormat.calls[0].rows, [], 'header-only 不得 decodeRow')
+  }))
+})
+
+test('legacy header-only 单帧 zstd：首帧解压超预算时有界响亮拒绝（不整档解压）', () => {
+  withTempRoot('single-frame-bomb', root => withIsolatedHome('single-frame-bomb-home', () => {
+    const id = 'session-single-frame-bomb'
+    const header = { id, version: 3, cwd: path.join(root, 'ws') }
+    const file = path.join(root, 'fixture-project', id, 'session.v3.jsonl.zstd')
+    // 65MiB 解压输出 > HEADER_DECODE_LIMIT(64MiB)：实测同步 zstd 无部分输出 API ⇒ 必须响亮拒绝。
+    singleFrameArtifact(file, header, Buffer.alloc(65 * 1024 * 1024, 0x41))
+    assert.throws(() => statLegacySession(root, id, strictFixtureFormat(0)), /header-only 预算/, '超预算必须响亮拒绝，不得整档解压')
+  }))
+})
+
+test('legacy 绑定整表快照：外部改写绑定库后立刻可见（文件指纹失效，不返回陈旧值）', () => {
+  withTempRoot('bindings-cache', root => withIsolatedHome('bindings-cache-home', () => {
+    const artifactA = path.join(root, 'a.json')
+    const artifactB = path.join(root, 'target-with-longer-name.json')
+    writeFileSync(artifactA, '{}')
+    writeFileSync(artifactB, '{}')
+    setLegacyBinding({ chatId: 'chat-cache', sessionId: 'session-cache', artifactPath: artifactA })
+    assert.equal(legacyBindingForChat('chat-cache').artifactPath, artifactA)
+    // 外部写：不经 setLegacyBinding、不清任何缓存，直接改库（值更长 ⇒ 文件指纹必变）
+    const db = new DatabaseSync(legacyBindingsPath())
+    try { db.prepare('UPDATE legacy_bindings SET artifact_path = ? WHERE chat_id = ?').run(artifactB, 'chat-cache') } finally { db.close() }
+    assert.equal(legacyBindingForChat('chat-cache').artifactPath, artifactB, '外写后必须立刻读到新值（按 query 分条缓存会返回陈旧值）')
+    assert.equal(listLegacyBindings().length, 1)
+  }))
+})
+
+test('legacy 绑定库缺表：按无绑定返回空，不抛底层 no such table', () => {
+  withIsolatedHome('bindings-notable-home', () => {
+    const file = legacyBindingsPath()
+    mkdirSync(path.dirname(file), { recursive: true })
+    const db = new DatabaseSync(file)
+    try { db.exec('CREATE TABLE unrelated (id TEXT PRIMARY KEY)') } finally { db.close() }
+    assert.deepEqual(listLegacyBindings(), [])
+    assert.equal(legacyBindingForChat('chat-none'), undefined)
+    assert.equal(legacyBindingForSession('session-none'), undefined)
+  })
+})
+
+test('legacy 原件定位：同一 session id 落在多个项目目录时取最高代 canonical（不因首个命中定论）', () => {
+  withTempRoot('multi-project', root => withIsolatedHome('multi-project-home', () => {
+    const id = 'session-multi-project'
+    const header = { id, version: 3, cwd: path.join(root, 'ws') }
+    // a-project：同 id 目录只有一个未发布的 .tmp（按首个命中目录定论会返回 undefined = 原件"不存在"）
+    const staleDir = path.join(root, 'a-project', id)
+    mkdirSync(staleDir, { recursive: true })
+    writeFileSync(path.join(staleDir, 'session.v9.jsonl.tmp'), '未发布临时文件', 'utf8')
+    // z-project：真实 canonical 日志两代，必须取最高代（与目录枚举顺序无关）
+    const realDir = path.join(root, 'z-project', id)
+    writeArtifact(path.join(realDir, 'session.jsonl'), header, [])
+    writeArtifact(path.join(realDir, 'session.v3.jsonl'), header, [])
+    assert.equal(legacyArtifactFor(root, id)?.path, path.join(realDir, 'session.v3.jsonl'), '必须遍历全部项目目录取最高代 canonical')
+    const statFormat = strictFixtureFormat(0)
+    assert.equal(statLegacySession(root, id, statFormat)?.meta?.id, id, '定位到的原件必须能被 header-only 观测')
+  }))
+})

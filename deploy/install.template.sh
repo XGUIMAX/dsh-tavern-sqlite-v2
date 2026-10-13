@@ -1,5 +1,7 @@
 #!/bin/sh
-# 本地优先；发布构建填入固定地址和摘要，再内嵌零依赖Node获取器。
+# 发行 SH 模板（唯一来源）：由 scripts/render-install-sh.mjs 连同 deploy/bootstrap.mjs 与当前 package.json 版本渲染成
+# 包内二入口（install.sh、deploy/install.sh，URL/SHA 保持占位，避免内嵌本次 tgz 摘要自引用）与外部发行件（地址与摘要只填一次）。
+# 源码树两入口不是本模板的产物，而是只读当前 manifest/bootstrap 的本地 wrapper；三者不得各写一份实现。
 set -eu
 RELEASE_URL='__DSH_RELEASE_URL__'
 RELEASE_SHA256='__DSH_RELEASE_SHA256__'
