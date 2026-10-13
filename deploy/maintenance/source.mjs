@@ -40,13 +40,18 @@ export const sameImage = (left, right) => JSON.stringify(left) === JSON.stringif
  * 有限源码访问器：写集＝显式 targets ＋ 块记录 ＋ 作者包身份文件。
  * 所有函数都是**本次现场**语义（捕获/回滚/比对都基于本次 capture），不使用任何历史 before/after。
  */
-export function sourceAccess(appDir, targets) {
+export function sourceAccess(appDir, targets, readSources = []) {
   if (typeof appDir !== 'string' || !path.isAbsolute(appDir)) throw new Error('源码根必须显式绝对路径（不按 cwd 静默解析）')
   const root = path.resolve(appDir), rootStat = lstatOrNull(root)
   if (!rootStat || !rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('源码根必须是已存在的真实目录（不接受符号链接）')
   if (!Array.isArray(targets) || targets.length === 0) throw new Error('有限目标清单不能为空')
   for (const rel of targets) { assertRel(rel, '有限目标'); if (!rel.startsWith('tavern-plugin/')) throw new Error('有限目标必须是作者源码路径：' + rel) }
-  const fixed = new Set([...targets, STANDARD_RECORD, AUTHOR_PACKAGE_REL])
+  // 只读接入源码（如 scene-slots.js）是接缝工厂**读取但不改写**的输入：它必须随写集一起进入预演副本，
+  // 否则副本里缺件会让 buildCore 的 presence 判据（present()/sceneSlots 开关）与真实现场分叉，预演出与
+  // 真实写入不同的 expected 图，收尾 assertImage(expected) 误报"源码与本次前像不符"并整单回滚（0.4.10 Windows 实测）。
+  if (!Array.isArray(readSources)) throw new Error('只读接入源码清单必须是数组')
+  for (const rel of readSources) { assertRel(rel, '只读接入源码'); if (!rel.startsWith('tavern-plugin/')) throw new Error('只读接入源码必须是作者源码路径：' + rel) }
+  const fixed = new Set([...targets, ...readSources, STANDARD_RECORD, AUTHOR_PACKAGE_REL])
   const legacy = new Set(OLD_RECORDS)
   function file(rel) {
     assertRel(rel, '源码目标')
@@ -214,7 +219,7 @@ export function assertPackageSource(access, adapter, { allowRebase = false, oper
 export function rehearseSource(action, access, adapter, evidenceDir, checkBudget = () => {}) {
   checkBudget()
   const before = access.capture()
-  const copyOf = name => { const dir = path.join(evidenceDir, name); mkdirSync(dir, { recursive: true }); const copy = sourceAccess(dir, adapter.targets); copy.restore(before); return { dir, copy } }
+  const copyOf = name => { const dir = path.join(evidenceDir, name); mkdirSync(dir, { recursive: true }); const copy = sourceAccess(dir, adapter.targets, adapter.readSources ?? []); copy.restore(before); return { dir, copy } }
   let result, cleaned = null
   if (action === 'install') {
     const { dir, copy } = copyOf('rehearsal')

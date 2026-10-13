@@ -289,7 +289,7 @@ export function runCli(url, adapter) {
     }
     const { withFileLock } = await import(runtime.atomicUrl)
     await withFileLock(path.join(op.home, 'maintenance', op.profile + '-plugin-operation'), async () => {
-      const source = sourceAccess(op.app, adapter.targets), driver = createDriver(op, adapter, root, evidence, budget)
+      const source = sourceAccess(op.app, adapter.targets, adapter.readSources ?? []), driver = createDriver(op, adapter, root, evidence, budget)
       const progress = text => console.log(Math.round(budget.elapsed()) + 'ms ' + text)
       try {
         let result
